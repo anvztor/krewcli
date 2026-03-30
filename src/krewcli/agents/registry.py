@@ -2,12 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic_ai import Agent
-
-from krewcli.agents.codex_agent import create_codex_agent, AgentDeps
+from krewcli.agents.base import AgentRunner
+from krewcli.agents.codex_agent import create_codex_agent
 from krewcli.agents.claude_agent import create_claude_agent
 from krewcli.agents.bub_agent import create_bub_agent
-from krewcli.agents.models import TaskResult
 
 AGENT_REGISTRY: dict[str, dict[str, Any]] = {
     "codex": {
@@ -28,7 +26,7 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
-def get_agent(name: str) -> Agent[AgentDeps, TaskResult]:
+def get_agent(name: str) -> AgentRunner:
     entry = AGENT_REGISTRY.get(name)
     if entry is None:
         raise ValueError(f"Unknown agent: {name}. Available: {list(AGENT_REGISTRY.keys())}")

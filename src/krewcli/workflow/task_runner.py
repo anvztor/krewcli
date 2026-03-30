@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import uuid
 
+from krewcli.agents.base import AgentDeps
 from krewcli.agents.models import TaskResult
-from krewcli.agents.registry import get_agent, AgentDeps
+from krewcli.agents.registry import get_agent
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.presence.heartbeat import HeartbeatLoop
 

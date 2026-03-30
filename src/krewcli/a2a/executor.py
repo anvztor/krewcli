@@ -14,7 +14,8 @@ from a2a.utils.artifact import new_text_artifact
 from a2a.utils.message import new_agent_text_message
 from a2a.utils.task import new_task
 
-from krewcli.agents.registry import get_agent, AgentDeps
+from krewcli.agents.base import AgentDeps
+from krewcli.agents.registry import get_agent
 from krewcli.agents.models import TaskResult
 
 

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import pytest
 from click.testing import CliRunner
+import httpx
 
 from krewcli.agents.models import TaskResult, FactRefResult, CodeRefResult
 from krewcli.agents.registry import AGENT_REGISTRY, get_agent_info
-from krewcli.cli import main
+from krewcli.cli import main, _run_task_worker_once
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.workflow.digest_builder import DigestBuilder
 
@@ -100,3 +101,103 @@ def test_krewhub_client_instantiation():
     client = KrewHubClient("http://127.0.0.1:8420", "test-key")
     assert client._client.base_url == "http://127.0.0.1:8420"
     assert client._client.headers["x-api-key"] == "test-key"
+
+
+@pytest.mark.asyncio
+async def test_krewhub_client_list_tasks_aggregates_bundle_data():
+    client = KrewHubClient("http://127.0.0.1:8420", "test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/recipes/rec_1/bundles":
+            return httpx.Response(
+                200,
+                json={
+                    "bundles": [
+                        {"id": "bun_1", "status": "open", "prompt": "First bundle"},
+                        {"id": "bun_2", "status": "digested", "prompt": "Done"},
+                    ]
+                },
+            )
+        if request.url.path == "/api/v1/bundles/bun_1":
+            return httpx.Response(
+                200,
+                json={
+                    "bundle": {"id": "bun_1", "status": "open"},
+                    "tasks": [{"id": "task_1", "bundle_id": "bun_1", "status": "open", "title": "A"}],
+                    "events": [],
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:8420",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    try:
+        tasks = await client.list_tasks("rec_1")
+    finally:
+        await client.close()
+
+    assert tasks == [
+        {
+            "id": "task_1",
+            "bundle_id": "bun_1",
+            "status": "open",
+            "title": "A",
+            "bundle_status": "open",
+            "bundle_prompt": "First bundle",
+        }
+    ]
+
+
+class _FakeHeartbeat:
+    def __init__(self) -> None:
+        self.current_task_id: str | None = None
+
+
+class _FakeRunner:
+    async def claim_and_execute(self, task_id: str) -> TaskResult:
+        assert task_id == "task_1"
+        return TaskResult(summary="Finished task", success=True)
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.digest_submissions: list[str] = []
+
+    async def list_tasks(self, recipe_id: str):
+        assert recipe_id == "rec_1"
+        return [{"id": "task_1", "bundle_id": "bun_1", "status": "open"}]
+
+    async def get_bundle(self, bundle_id: str):
+        assert bundle_id == "bun_1"
+        return {
+            "bundle": {"id": "bun_1", "status": "cooked"},
+            "tasks": [{"id": "task_1"}],
+            "events": [],
+        }
+
+    async def submit_digest(self, bundle_id: str, submitted_by: str, summary: str, task_results, facts, code_refs):
+        self.digest_submissions.append(bundle_id)
+        return {"id": "dig_1", "bundle_id": bundle_id, "summary": summary, "submitted_by": submitted_by}
+
+
+@pytest.mark.asyncio
+async def test_run_task_worker_once_claims_and_submits_digest():
+    client = _FakeClient()
+    digest_builders: dict[str, DigestBuilder] = {}
+
+    worked = await _run_task_worker_once(
+        client=client,
+        runner=_FakeRunner(),
+        heartbeat=_FakeHeartbeat(),
+        recipe_id="rec_1",
+        agent_id="agent_1",
+        digest_builders=digest_builders,
+    )
+
+    assert worked is True
+    assert client.digest_submissions == ["bun_1"]
+    assert digest_builders == {}

@@ -42,6 +42,29 @@ class KrewHubClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def list_tasks(
+        self,
+        recipe_id: str,
+        bundle_statuses: tuple[str, ...] = ("open", "claimed", "blocked", "cooked"),
+    ) -> list[dict[str, Any]]:
+        tasks: list[dict[str, Any]] = []
+        bundles = await self.list_bundles(recipe_id)
+
+        for bundle in bundles:
+            if bundle.get("status") not in bundle_statuses:
+                continue
+            bundle_detail = await self.get_bundle(bundle["id"])
+            for task in bundle_detail.get("tasks", []):
+                tasks.append(
+                    {
+                        **task,
+                        "bundle_status": bundle["status"],
+                        "bundle_prompt": bundle["prompt"],
+                    }
+                )
+
+        return tasks
+
     # --- Tasks ---
 
     async def claim_task(self, task_id: str, agent_id: str) -> dict[str, Any]:

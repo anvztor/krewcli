@@ -53,7 +53,7 @@ def start(
     resolved_agent_id = agent_id or f"{agent}_{os.getpid()}"
     resolved_workdir = os.path.abspath(workdir)
 
-    click.echo(f"Starting KrewCLI agent server")
+    click.echo("Starting KrewCLI agent server")
     click.echo(f"  Agent: {info['display_name']} ({resolved_agent_id})")
     click.echo(f"  Recipe: {recipe}")
     click.echo(f"  Work dir: {resolved_workdir}")
@@ -91,6 +91,18 @@ async def _run_server(
     )
     heartbeat.start()
 
+    worker_task = asyncio.create_task(
+        _run_task_worker(
+            settings=settings,
+            client=client,
+            heartbeat=heartbeat,
+            recipe_id=recipe_id,
+            agent_name=agent_name,
+            agent_id=agent_id,
+            working_dir=working_dir,
+        )
+    )
+
     a2a_app = create_a2a_app(
         host=settings.agent_host,
         port=settings.agent_port,
@@ -109,8 +121,87 @@ async def _run_server(
     try:
         await server.serve()
     finally:
+        worker_task.cancel()
+        await asyncio.gather(worker_task, return_exceptions=True)
         await heartbeat.stop()
         await client.close()
+
+
+async def _run_task_worker(
+    settings,
+    client: KrewHubClient,
+    heartbeat: HeartbeatLoop,
+    recipe_id: str,
+    agent_name: str,
+    agent_id: str,
+    working_dir: str,
+) -> None:
+    runner = TaskRunner(
+        client=client,
+        heartbeat=heartbeat,
+        agent_name=agent_name,
+        agent_id=agent_id,
+        working_dir=working_dir,
+        repo_url="",
+        branch="main",
+    )
+    digest_builders: dict[str, DigestBuilder] = {}
+
+    while True:
+        try:
+            await _run_task_worker_once(
+                client=client,
+                runner=runner,
+                heartbeat=heartbeat,
+                recipe_id=recipe_id,
+                agent_id=agent_id,
+                digest_builders=digest_builders,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception("Task worker cycle failed")
+
+        await asyncio.sleep(settings.task_poll_interval)
+
+
+async def _run_task_worker_once(
+    client: KrewHubClient,
+    runner: TaskRunner,
+    heartbeat: HeartbeatLoop,
+    recipe_id: str,
+    agent_id: str,
+    digest_builders: dict[str, DigestBuilder],
+) -> bool:
+    if heartbeat.current_task_id is not None:
+        return False
+
+    tasks = await client.list_tasks(recipe_id)
+    open_tasks = [task for task in tasks if task.get("status") == "open"]
+    if not open_tasks:
+        return False
+
+    task = open_tasks[0]
+    result = await runner.claim_and_execute(task["id"])
+    if result is None or not result.success:
+        return True
+
+    bundle_id = task["bundle_id"]
+    builder = digest_builders.setdefault(bundle_id, DigestBuilder(client=client, agent_id=agent_id))
+    builder.add_result(task["id"], result)
+
+    bundle = await client.get_bundle(bundle_id)
+    bundle_data = bundle.get("bundle", {})
+    bundle_tasks = bundle.get("tasks", [])
+
+    if bundle_data.get("status") == "cooked":
+        task_ids = [item["id"] for item in bundle_tasks]
+        if builder.has_results_for_tasks(task_ids):
+            digest = await builder.submit(bundle_id)
+            if digest is not None:
+                digest_builders.pop(bundle_id, None)
+
+    return True
 
 
 @main.command("list-tasks")
@@ -122,25 +213,27 @@ def list_tasks(ctx: click.Context, recipe: str) -> None:
 
     async def _run():
         try:
-            bundles = await client.list_bundles(recipe)
-            for b in bundles:
-                if b["status"] in ("open", "claimed"):
-                    bundle = await client.get_bundle(b["id"])
-                    tasks = bundle.get("tasks", [])
-                    click.echo(f"\nBundle: {b['id']} [{b['status']}]")
-                    click.echo(f"  Prompt: {b['prompt'][:80]}")
-                    for t in tasks:
-                        status_icon = {
-                            "open": "[ ]",
-                            "claimed": "[>]",
-                            "working": "[~]",
-                            "done": "[x]",
-                            "blocked": "[!]",
-                            "cancelled": "[-]",
-                        }.get(t["status"], "[?]")
-                        agent = t.get("claimed_by_agent_id", "")
-                        agent_str = f" ({agent})" if agent else ""
-                        click.echo(f"    {status_icon} {t['id']}: {t['title']}{agent_str}")
+            tasks = await client.list_tasks(recipe, bundle_statuses=("open", "claimed"))
+            seen_bundles: set[str] = set()
+
+            for task in tasks:
+                bundle_id = task["bundle_id"]
+                if bundle_id not in seen_bundles:
+                    seen_bundles.add(bundle_id)
+                    click.echo(f"\nBundle: {bundle_id} [{task['bundle_status']}]")
+                    click.echo(f"  Prompt: {task['bundle_prompt'][:80]}")
+
+                status_icon = {
+                    "open": "[ ]",
+                    "claimed": "[>]",
+                    "working": "[~]",
+                    "done": "[x]",
+                    "blocked": "[!]",
+                    "cancelled": "[-]",
+                }.get(task["status"], "[?]")
+                agent = task.get("claimed_by_agent_id", "")
+                agent_str = f" ({agent})" if agent else ""
+                click.echo(f"    {status_icon} {task['id']}: {task['title']}{agent_str}")
         finally:
             await client.close()
 

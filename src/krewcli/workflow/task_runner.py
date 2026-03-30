@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
 
 from krewcli.agents.models import TaskResult
 from krewcli.agents.registry import get_agent, AgentDeps

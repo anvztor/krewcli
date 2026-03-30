@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from krewcli.a2a.card import build_agent_card
 
 

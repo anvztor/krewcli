@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     agent_port: int = 9999
     agent_host: str = "127.0.0.1"
     heartbeat_interval: int = 15
+    task_poll_interval: int = 5
     default_recipe_id: str = ""
 
     model_config = {"env_prefix": "KREWCLI_"}

@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import pytest
-
 from krewcli.presence.heartbeat import HeartbeatLoop
 from krewcli.client.krewhub_client import KrewHubClient
 

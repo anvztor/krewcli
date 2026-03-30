@@ -25,6 +25,9 @@ class DigestBuilder:
     def add_result(self, task_id: str, result: TaskResult) -> None:
         self._results[task_id] = result
 
+    def has_results_for_tasks(self, task_ids: list[str]) -> bool:
+        return all(task_id in self._results for task_id in task_ids)
+
     async def submit(self, bundle_id: str) -> dict[str, Any] | None:
         if not self._results:
             logger.warning("No task results to submit as digest")

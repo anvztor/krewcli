@@ -69,6 +69,40 @@ def test_cli_status_command():
     assert "bub" in result.output
 
 
+def test_claim_command_reports_blocked_task(monkeypatch):
+    class FakeHeartbeatLoop:
+        def __init__(self, *args, **kwargs) -> None:
+            self.current_task_id = None
+
+        def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+    class FakeTaskRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def claim_and_execute(self, task_id: str) -> TaskResult:
+            assert task_id == "task_1"
+            return TaskResult(
+                summary="Could not complete",
+                success=False,
+                blocked_reason="Missing dependency",
+            )
+
+    monkeypatch.setattr("krewcli.cli.HeartbeatLoop", FakeHeartbeatLoop)
+    monkeypatch.setattr("krewcli.cli.TaskRunner", FakeTaskRunner)
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["claim", "task_1", "--recipe", "rec_1"])
+
+    assert result.exit_code == 0
+    assert "Task task_1 blocked: Missing dependency" in result.output
+    assert "completed" not in result.output
+
+
 def test_digest_builder_add_and_clear():
     client = KrewHubClient("http://fake:1234", "key")
     builder = DigestBuilder(client=client, agent_id="test_agent")

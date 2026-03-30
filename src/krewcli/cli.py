@@ -288,10 +288,13 @@ def claim(
 
         try:
             result = await runner.claim_and_execute(task_id)
-            if result:
+            if result is None:
+                click.echo(f"Task {task_id} failed or could not be claimed")
+            elif result.success:
                 click.echo(f"Task {task_id} completed: {result.summary}")
             else:
-                click.echo(f"Task {task_id} failed or could not be claimed")
+                reason = result.blocked_reason or result.summary
+                click.echo(f"Task {task_id} blocked: {reason}")
         finally:
             await heartbeat.stop()
             await client.close()

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from a2a.types import TaskState
+
 from krewcli.a2a.card import build_agent_card
+from krewcli.a2a.executor import _new_status_event
 
 
 def test_build_agent_card_single_agent():
@@ -29,3 +32,13 @@ def test_build_agent_card_unknown_agent_ignored():
 def test_agent_card_has_streaming():
     card = build_agent_card("localhost", 9999, ["claude"])
     assert card.capabilities.streaming is True
+
+
+def test_new_status_event_sets_final_flag():
+    working = _new_status_event("task_1", "ctx_1", TaskState.working, final=False)
+    completed = _new_status_event("task_1", "ctx_1", TaskState.completed, final=True)
+
+    assert working.final is False
+    assert working.status.state == TaskState.working
+    assert completed.final is True
+    assert completed.status.state == TaskState.completed

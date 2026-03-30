@@ -42,14 +42,13 @@ class KrewAgentExecutor(AgentExecutor):
         await event_queue.enqueue_event(task)
 
         await event_queue.enqueue_event(
-            TaskStatusUpdateEvent(
+            _new_status_event(
                 task_id=context.task_id,
                 context_id=context.context_id,
-                status=TaskStatus(
-                    state=TaskState.working,
-                    message=new_agent_text_message(
-                        f"Delegating to {self._default_agent_name}..."
-                    ),
+                state=TaskState.working,
+                final=False,
+                message=new_agent_text_message(
+                    f"Delegating to {self._default_agent_name}..."
                 ),
             )
         )
@@ -76,22 +75,22 @@ class KrewAgentExecutor(AgentExecutor):
                 )
             )
             await event_queue.enqueue_event(
-                TaskStatusUpdateEvent(
+                _new_status_event(
                     task_id=context.task_id,
                     context_id=context.context_id,
-                    status=TaskStatus(state=TaskState.completed),
+                    state=TaskState.completed,
+                    final=True,
                 )
             )
 
         except Exception as exc:
             await event_queue.enqueue_event(
-                TaskStatusUpdateEvent(
+                _new_status_event(
                     task_id=context.task_id,
                     context_id=context.context_id,
-                    status=TaskStatus(
-                        state=TaskState.failed,
-                        message=new_agent_text_message(f"Error: {exc}"),
-                    ),
+                    state=TaskState.failed,
+                    final=True,
+                    message=new_agent_text_message(f"Error: {exc}"),
                 )
             )
 
@@ -99,13 +98,12 @@ class KrewAgentExecutor(AgentExecutor):
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
         await event_queue.enqueue_event(
-            TaskStatusUpdateEvent(
+            _new_status_event(
                 task_id=context.task_id,
                 context_id=context.context_id,
-                status=TaskStatus(
-                    state=TaskState.canceled,
-                    message=new_agent_text_message("Task cancelled."),
-                ),
+                state=TaskState.canceled,
+                final=True,
+                message=new_agent_text_message("Task cancelled."),
             )
         )
 
@@ -127,3 +125,18 @@ def _extract_text(context: RequestContext) -> str:
             if hasattr(part, "text"):
                 return part.text
     return ""
+
+
+def _new_status_event(
+    task_id: str | None,
+    context_id: str | None,
+    state: TaskState,
+    final: bool,
+    message=None,
+) -> TaskStatusUpdateEvent:
+    return TaskStatusUpdateEvent(
+        task_id=task_id,
+        context_id=context_id,
+        final=final,
+        status=TaskStatus(state=state, message=message),
+    )

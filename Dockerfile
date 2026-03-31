@@ -25,9 +25,12 @@ COPY docker/start-krewcli-compose.sh ./docker/start-krewcli-compose.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev \
     && npm install -g @openai/codex@0.117.0 \
+    && mkdir -p /home/krewcli \
+    && chmod 0777 /home/krewcli \
     && chmod +x /app/docker/start-krewcli-compose.sh
 
 ENV PATH="/app/.venv/bin:${PATH}"
+ENV HOME=/home/krewcli
 
 WORKDIR /workspace
 

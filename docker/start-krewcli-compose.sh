@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-home_dir="${HOME:-/tmp/krewcli-home}"
+home_dir="${HOME:-/home/krewcli}"
 codex_dir="${home_dir}/.codex"
 host_codex_dir="${HOST_CODEX_DIR:-/host-codex}"
 

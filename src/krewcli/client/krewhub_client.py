@@ -135,6 +135,24 @@ class KrewHubClient:
         resp.raise_for_status()
         return resp.json()["digest"]
 
+    async def post_decision(
+        self,
+        bundle_id: str,
+        decision: str,
+        decided_by: str,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        resp = await self._client.post(
+            f"/api/v1/bundles/{bundle_id}/decision",
+            json={
+                "decision": decision,
+                "decided_by": decided_by,
+                "note": note,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["digest"]
+
     # --- Presence ---
 
     async def heartbeat(

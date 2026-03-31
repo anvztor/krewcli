@@ -136,14 +136,15 @@ async def _run_task_worker(
     agent_id: str,
     working_dir: str,
 ) -> None:
+    repo_url, branch = await _load_recipe_context(client, recipe_id)
     runner = TaskRunner(
         client=client,
         heartbeat=heartbeat,
         agent_name=agent_name,
         agent_id=agent_id,
         working_dir=working_dir,
-        repo_url="",
-        branch="main",
+        repo_url=repo_url,
+        branch=branch,
     )
     digest_builders: dict[str, DigestBuilder] = {}
 
@@ -202,6 +203,18 @@ async def _run_task_worker_once(
                 digest_builders.pop(bundle_id, None)
 
     return True
+
+
+async def _load_recipe_context(
+    client: KrewHubClient,
+    recipe_id: str,
+) -> tuple[str, str]:
+    recipe_detail = await client.get_recipe(recipe_id)
+    recipe = recipe_detail.get("recipe", {})
+    return (
+        recipe.get("repo_url", ""),
+        recipe.get("default_branch", "main"),
+    )
 
 
 @main.command("list-tasks")
@@ -266,6 +279,7 @@ def claim(
     info = get_agent_info(agent)
 
     async def _run():
+        repo_url, branch = await _load_recipe_context(client, recipe)
         heartbeat = HeartbeatLoop(
             client=client,
             agent_id=resolved_agent_id,
@@ -282,8 +296,8 @@ def claim(
             agent_name=agent,
             agent_id=resolved_agent_id,
             working_dir=os.path.abspath(workdir),
-            repo_url="",
-            branch="main",
+            repo_url=repo_url,
+            branch=branch,
         )
 
         try:

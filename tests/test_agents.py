@@ -41,4 +41,40 @@ async def test_local_agent_run_uses_async_command_runner(monkeypatch):
     assert result.output.success is True
     assert result.output.files_modified == ["src/app.py"]
     assert result.output.code_refs[0].commit_sha == "abc123"
-    assert calls[0][0][0] == "codex"
+    assert calls[0][0] == (
+        "codex",
+        "exec",
+        "--skip-git-repo-check",
+        "--full-auto",
+        "fix it",
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_agent_run_handles_missing_git(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run_command(
+        args: list[str],
+        working_dir: str,
+        *,
+        timeout: int = 30,
+    ) -> CommandResult:
+        calls.append(tuple(args))
+        if args[0] == "codex":
+            return CommandResult(0, "Hi from Codex", "")
+        raise FileNotFoundError(args[0])
+
+    monkeypatch.setattr(base, "_run_command", fake_run_command)
+
+    agent = create_codex_agent()
+    result = await agent.run(
+        "say hi",
+        deps=AgentDeps(working_dir=".", repo_url="", branch="main"),
+    )
+
+    assert result.output.success is True
+    assert result.output.files_modified == []
+    assert result.output.code_refs == []
+    assert result.output.summary == "Hi from Codex"
+    assert calls[0][0] == "codex"

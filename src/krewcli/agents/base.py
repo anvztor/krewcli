@@ -122,7 +122,11 @@ async def _read_git_value(
     *,
     allow_empty: bool = False,
 ) -> str:
-    completed = await _run_command(args, working_dir)
+    try:
+        completed = await _run_command(args, working_dir)
+    except FileNotFoundError:
+        return ""
+
     if completed.returncode != 0:
         return ""
 

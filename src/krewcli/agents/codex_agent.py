@@ -10,9 +10,9 @@ def create_codex_agent() -> LocalCliAgent:
         name="Codex",
         command_builder=lambda prompt: [
             "codex",
-            "--quiet",
-            "--approval-mode",
-            "full-auto",
+            "exec",
+            "--skip-git-repo-check",
+            "--full-auto",
             prompt,
         ],
     )

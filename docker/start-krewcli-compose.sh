@@ -2,22 +2,45 @@
 set -eu
 
 home_dir="${HOME:-/home/krewcli}"
+agent_name="${KREWCLI_AGENT_NAME:-codex}"
+
+# --- Codex auth ---
 codex_dir="${home_dir}/.codex"
 host_codex_dir="${HOST_CODEX_DIR:-/host-codex}"
-
 mkdir -p "${codex_dir}"
 
 if [ -f "${host_codex_dir}/auth.json" ]; then
   cp "${host_codex_dir}/auth.json" "${codex_dir}/auth.json"
 fi
-
 if [ -f "${host_codex_dir}/config.toml" ]; then
   cp "${host_codex_dir}/config.toml" "${codex_dir}/config.toml"
 fi
 
-if [ -z "${OPENAI_API_KEY:-}" ] && [ ! -f "${codex_dir}/auth.json" ]; then
-  echo "Missing Codex auth. Set OPENAI_API_KEY or mount ~/.codex into ${host_codex_dir}." >&2
-  exit 1
+# --- Claude auth ---
+claude_dir="${home_dir}/.claude"
+host_claude_dir="${HOST_CLAUDE_DIR:-/host-claude}"
+mkdir -p "${claude_dir}"
+
+if [ -d "${host_claude_dir}" ]; then
+  # Copy Claude config files if mounted
+  for f in settings.json settings.local.json credentials.json; do
+    if [ -f "${host_claude_dir}/${f}" ]; then
+      cp "${host_claude_dir}/${f}" "${claude_dir}/${f}"
+    fi
+  done
+fi
+
+# --- Validate auth for the chosen agent ---
+if [ "${agent_name}" = "codex" ]; then
+  if [ -z "${OPENAI_API_KEY:-}" ] && [ ! -f "${codex_dir}/auth.json" ]; then
+    echo "Missing Codex auth. Set OPENAI_API_KEY or mount ~/.codex into ${host_codex_dir}." >&2
+    exit 1
+  fi
+elif [ "${agent_name}" = "claude" ]; then
+  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ ! -d "${host_claude_dir}" ]; then
+    echo "Missing Claude auth. Set ANTHROPIC_API_KEY or mount ~/.claude into ${host_claude_dir}." >&2
+    exit 1
+  fi
 fi
 
 recipe_id="$(

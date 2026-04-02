@@ -24,7 +24,7 @@ COPY docker/start-krewcli-compose.sh ./docker/start-krewcli-compose.sh
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev \
-    && npm install -g @openai/codex@0.117.0 \
+    && npm install -g @openai/codex@0.117.0 @anthropic-ai/claude-code \
     && mkdir -p /home/krewcli \
     && chmod 0777 /home/krewcli \
     && chmod +x /app/docker/start-krewcli-compose.sh

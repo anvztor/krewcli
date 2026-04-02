@@ -170,12 +170,7 @@ async def _run_agent(settings, recipe_id, agent_id, display_name, capabilities, 
     if mode.startswith("cli:") and agent_name:
         worker_task = asyncio.create_task(_run_task_worker(settings=settings, client=client, heartbeat=heartbeat, recipe_id=recipe_id, agent_name=agent_name, agent_id=agent_id, working_dir=working_dir))
 
-    # Determine planning model from mode
-    plan_model = "anthropic:claude-sonnet-4-20250514"
-    if "openai" in mode:
-        plan_model = "openai:gpt-4o"
-
-    a2a_app = create_a2a_app(agent_card=card, executor=executor, plan_model=plan_model)
+    a2a_app = create_a2a_app(agent_card=card, executor=executor)
     config = uvicorn.Config(a2a_app.build(), host=settings.agent_host, port=settings.agent_port, log_level="info")
     server = uvicorn.Server(config)
 

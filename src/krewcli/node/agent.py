@@ -7,6 +7,7 @@ from typing import Any
 from krewcli.agents.registry import get_agent_info
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.presence.heartbeat import HeartbeatLoop
+from krewcli.storage.tape_client import TapeStorageClient
 from krewcli.watch.client import WatchClient, WatchEvent
 from krewcli.workflow.digest_builder import DigestBuilder
 from krewcli.workflow.task_runner import TaskRunner
@@ -80,6 +81,7 @@ class NodeAgent:
         )
 
         self._watch: WatchClient | None = None
+        self._storage: TapeStorageClient | None = None
         if krewhub_url and api_key:
             self._watch = WatchClient(
                 base_url=krewhub_url,
@@ -87,6 +89,7 @@ class NodeAgent:
                 resource_type="task",
                 recipe_id=recipe_id,
             )
+            self._storage = TapeStorageClient(krewhub_url, api_key)
 
         self._digest_builders: dict[str, DigestBuilder] = {}
         self._running = False
@@ -123,6 +126,8 @@ class NodeAgent:
         self._running = False
         if self._watch is not None:
             await self._watch.stop()
+        if self._storage is not None:
+            await self._storage.close()
         await self._heartbeat.stop()
 
     async def _reconcile_on_start(self) -> None:
@@ -171,18 +176,26 @@ class NodeAgent:
         asyncio.create_task(self._execute_task(task_id))
 
     async def _execute_task(self, task_id: str) -> None:
-        """Execute an assigned task via the TaskRunner."""
+        """Execute an assigned task via the TaskRunner.
+
+        CSI integration: loads context from the recipe's tape before
+        execution, giving the agent awareness of prior work.
+        """
+        # Load context from tape (CSI mount)
+        if self._storage is not None:
+            try:
+                ctx = await self._storage.load_context(self._recipe_id)
+                if ctx.summary:
+                    logger.info("NodeAgent: loaded %d tape entries as context", len(ctx.entries))
+            except Exception:
+                logger.debug("NodeAgent: tape context load failed, continuing without")
+
         try:
             result = await self._runner.claim_and_execute(task_id)
             if result is None or not result.success:
                 return
-
-            # Handle digest building
-            task_data = await self._client.claim_task(task_id, self._agent_id)
-            bundle_id = task_data.get("bundle_id", "")
         except Exception:
-            # claim_and_execute already claimed, so get bundle_id differently
-            logger.debug("Post-execute bundle lookup, fetching task info")
+            logger.debug("NodeAgent: task execution failed for %s", task_id)
             return
 
         try:

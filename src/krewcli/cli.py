@@ -38,6 +38,7 @@ def main(ctx: click.Context) -> None:
     help="Agent backend to use",
 )
 @click.option("--agent-id", default=None, help="Override agent ID")
+@click.option("--port", default=None, type=int, help="A2A server port (default: 9999)")
 @click.option("--workdir", default=".", help="Working directory for agent")
 @click.option(
     "--mode",
@@ -51,11 +52,14 @@ def start(
     recipe: str,
     agent: str,
     agent_id: str | None,
+    port: int | None,
     workdir: str,
     mode: str,
 ) -> None:
     """Start the A2A agent server with heartbeat to KrewHub."""
     settings = ctx.obj["settings"]
+    if port is not None:
+        settings = settings.model_copy(update={"agent_port": port})
     info = get_agent_info(agent)
     resolved_agent_id = agent_id or f"{agent}_{os.getpid()}"
     resolved_workdir = os.path.abspath(workdir)

@@ -184,6 +184,7 @@ class KrewHubClient:
         recipe_id: str,
         display_name: str,
         capabilities: list[str],
+        endpoint_url: str | None = None,
         current_task_id: str | None = None,
     ) -> dict[str, Any]:
         resp = await self._client.post(
@@ -193,6 +194,7 @@ class KrewHubClient:
                 "recipe_id": recipe_id,
                 "display_name": display_name,
                 "capabilities": capabilities,
+                "endpoint_url": endpoint_url,
                 "current_task_id": current_task_id,
             },
         )

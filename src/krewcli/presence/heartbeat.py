@@ -61,6 +61,7 @@ class HeartbeatLoop:
                     recipe_id=self._recipe_id,
                     display_name=self._display_name,
                     capabilities=self._capabilities,
+                    endpoint_url=self._endpoint_url,
                     current_task_id=self._current_task_id,
                 )
                 logger.debug("Heartbeat sent (task=%s)", self._current_task_id)

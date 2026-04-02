@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -18,6 +19,8 @@ from starlette.routing import Route
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +57,43 @@ _plan_agent: Agent[None, TaskPlan] | None = None
 def _get_plan_agent(model: str) -> Agent[None, TaskPlan]:
     global _plan_agent
     if _plan_agent is None:
+        llm_model = _build_model(model)
         _plan_agent = Agent(
-            model,
+            llm_model,
             result_type=TaskPlan,
             system_prompt=PLAN_SYSTEM_PROMPT,
         )
     return _plan_agent
+
+
+def _build_model(model_spec: str):
+    """Build a pydantic-ai model, respecting gateway env vars.
+
+    Supports:
+    - ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (gateway/proxy)
+    - ANTHROPIC_API_KEY (direct)
+    - Falls back to pydantic-ai default resolution
+    """
+    base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    api_key = (
+        os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or os.environ.get("ANTHROPIC_API_KEY")
+    )
+
+    if model_spec.startswith("anthropic:"):
+        model_name = model_spec.split(":", 1)[1]
+    else:
+        model_name = model_spec
+
+    if base_url or api_key:
+        provider = AnthropicProvider(
+            api_key=api_key or "dummy",
+            base_url=base_url,
+        )
+        return AnthropicModel(model_name, provider=provider)
+
+    # Default: let pydantic-ai resolve from environment
+    return model_spec
 
 
 async def handle_plan(request: Request) -> JSONResponse:

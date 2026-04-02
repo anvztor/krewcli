@@ -24,13 +24,15 @@ from a2a.utils.task import new_task
 
 from pydantic_ai import Agent
 
+from krewcli.a2a.plan_endpoint import _build_model
+
 
 class DirectLLMExecutor(AgentExecutor):
     """Tier 1: Stateless LLM call. Prompt in, text out. No tools."""
 
     def __init__(self, model: str) -> None:
         self._model = model
-        self._agent = Agent(model, result_type=str)
+        self._agent = Agent(_build_model(model), result_type=str)
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         task = context.current_task or new_task(context.message)

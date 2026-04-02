@@ -26,6 +26,7 @@ from a2a.utils.task import new_task
 
 from pydantic_ai import Agent
 
+from krewcli.a2a.plan_endpoint import _build_model
 from krewcli.agents.models import TaskResult
 from krewcli.a2a.tools.bash_tool import TaskDeps, bash_exec
 from krewcli.a2a.tools.file_tools import read_file, write_file, edit_file
@@ -53,7 +54,7 @@ class FrameworkExecutor(AgentExecutor):
         self._model = model
         self._working_dir = working_dir
         self._agent = Agent(
-            model,
+            _build_model(model),
             result_type=TaskResult,
             system_prompt=SYSTEM_PROMPT,
             deps_type=TaskDeps,

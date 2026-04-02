@@ -55,7 +55,7 @@ class FrameworkExecutor(AgentExecutor):
         self._working_dir = working_dir
         self._agent = Agent(
             _build_model(model),
-            result_type=TaskResult,
+            output_type=TaskResult,
             system_prompt=SYSTEM_PROMPT,
             deps_type=TaskDeps,
         )

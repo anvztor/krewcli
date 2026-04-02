@@ -60,7 +60,7 @@ def _get_plan_agent(model: str) -> Agent[None, TaskPlan]:
         llm_model = _build_model(model)
         _plan_agent = Agent(
             llm_model,
-            result_type=TaskPlan,
+            output_type=TaskPlan,
             system_prompt=PLAN_SYSTEM_PROMPT,
         )
     return _plan_agent

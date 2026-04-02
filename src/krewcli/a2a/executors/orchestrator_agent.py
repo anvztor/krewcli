@@ -73,7 +73,7 @@ class PlanNode(BaseNode[OrchestrationState]):
     model: str = "anthropic:claude-sonnet-4-20250514"
 
     async def run(self, ctx: GraphRunContext[OrchestrationState]) -> Union[DispatchNode, End[str]]:
-        planner = Agent(self.model, result_type=TaskPlan, system_prompt=(
+        planner = Agent(self.model, output_type=TaskPlan, system_prompt=(
             "You are a project planner. Given a request, break it down into "
             "2-5 concrete, actionable coding tasks. Each task should be "
             "independently executable by a coding agent."
@@ -165,7 +165,7 @@ class SynthesizeNode(BaseNode[OrchestrationState]):
             f"- Task {tid}: {status}" for tid, status in ctx.state.results.items()
         )
 
-        synthesizer = Agent(self.model, result_type=str, system_prompt=(
+        synthesizer = Agent(self.model, output_type=str, system_prompt=(
             "Summarize the results of a multi-task orchestration. "
             "Be concise — 2-3 sentences."
         ))

@@ -32,7 +32,7 @@ class DirectLLMExecutor(AgentExecutor):
 
     def __init__(self, model: str) -> None:
         self._model = model
-        self._agent = Agent(_build_model(model), result_type=str)
+        self._agent = Agent(_build_model(model), output_type=str)
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         task = context.current_task or new_task(context.message)

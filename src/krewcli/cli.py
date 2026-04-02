@@ -130,11 +130,9 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, hos
 
     if orchestrator:
         from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor, build_orchestrator_card
-        p = provider or "anthropic"
-        m = model or _default_model(p)
-        executor = OrchestratorExecutor(model=f"{p}:{m}", krewhub_url=settings.krewhub_url, api_key=settings.api_key)
+        executor = OrchestratorExecutor()
         card = build_orchestrator_card(host, port)
-        return "orchestrator", executor, card, "Orchestrator", ["orchestrate", "decompose", "coordinate"]
+        return "orchestrator", executor, card, "Orchestrator", ["orchestrate", "plan", "decompose", "coordinate"]
 
     raise click.UsageError("Specify one of: --agent, --provider, --framework, --endpoint, or --orchestrator")
 

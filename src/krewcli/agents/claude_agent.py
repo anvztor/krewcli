@@ -12,6 +12,7 @@ def create_claude_agent() -> LocalCliAgent:
             "claude",
             "-p",
             prompt,
+            "--dangerously-skip-permissions",
             "--allowedTools",
             "Edit,Write,Bash,Read,Glob,Grep",
         ],

@@ -37,8 +37,9 @@ if [ "${agent_name}" = "codex" ]; then
     exit 1
   fi
 elif [ "${agent_name}" = "claude" ]; then
-  if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ ! -d "${host_claude_dir}" ]; then
-    echo "Missing Claude auth. Set ANTHROPIC_API_KEY or mount ~/.claude into ${host_claude_dir}." >&2
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "Missing Claude auth. Set ANTHROPIC_API_KEY in .env or environment." >&2
+    echo "Get a key from https://console.anthropic.com/settings/keys" >&2
     exit 1
   fi
 fi

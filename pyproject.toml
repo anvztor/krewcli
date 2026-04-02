@@ -11,6 +11,8 @@ dependencies = [
     "uvicorn>=0.34.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
+    "PyJWT>=2.9.0",
+    "bcrypt>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -34,3 +36,8 @@ target-version = "py312"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]

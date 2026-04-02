@@ -162,6 +162,7 @@ class KrewHubClient:
         display_name: str,
         capabilities: list[str],
         max_concurrent_tasks: int = 1,
+        endpoint_url: str | None = None,
     ) -> dict[str, Any]:
         resp = await self._client.post(
             "/api/v1/agents/register",
@@ -171,6 +172,7 @@ class KrewHubClient:
                 "display_name": display_name,
                 "capabilities": capabilities,
                 "max_concurrent_tasks": max_concurrent_tasks,
+                "endpoint_url": endpoint_url,
             },
         )
         resp.raise_for_status()

@@ -19,6 +19,7 @@ class HeartbeatLoop:
         display_name: str,
         capabilities: list[str],
         interval: int = 15,
+        endpoint_url: str | None = None,
     ) -> None:
         self._client = client
         self._agent_id = agent_id
@@ -26,6 +27,7 @@ class HeartbeatLoop:
         self._display_name = display_name
         self._capabilities = capabilities
         self._interval = interval
+        self._endpoint_url = endpoint_url
         self._current_task_id: str | None = None
         self._task: asyncio.Task | None = None
 

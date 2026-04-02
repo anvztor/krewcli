@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 import click
 import uvicorn
@@ -11,8 +12,9 @@ from krewcli.agents.registry import AGENT_REGISTRY, get_agent_info
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.config import get_settings
 from krewcli.presence.heartbeat import HeartbeatLoop
-from krewcli.workflow.task_runner import TaskRunner
+from krewcli.repo_diagram import build_repo_diagram
 from krewcli.workflow.digest_builder import DigestBuilder
+from krewcli.workflow.task_runner import TaskRunner
 
 
 @click.group()
@@ -145,19 +147,35 @@ async def _run_agent(settings, recipe_id, agent_id, display_name, capabilities, 
     from krewcli.a2a.server import create_a2a_app
     client = KrewHubClient(settings.krewhub_url, settings.api_key)
 
+    endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}"
+
     try:
-        await client.register_agent(agent_id=agent_id, recipe_id=recipe_id, display_name=display_name, capabilities=capabilities)
+        await client.register_agent(
+            agent_id=agent_id, recipe_id=recipe_id,
+            display_name=display_name, capabilities=capabilities,
+            endpoint_url=endpoint_url,
+        )
     except Exception:
         logging.getLogger(__name__).warning("Registration failed, continuing with heartbeat")
 
-    heartbeat = HeartbeatLoop(client=client, agent_id=agent_id, recipe_id=recipe_id, display_name=display_name, capabilities=capabilities, interval=settings.heartbeat_interval)
+    heartbeat = HeartbeatLoop(
+        client=client, agent_id=agent_id, recipe_id=recipe_id,
+        display_name=display_name, capabilities=capabilities,
+        interval=settings.heartbeat_interval,
+        endpoint_url=endpoint_url,
+    )
     heartbeat.start()
 
     worker_task = None
     if mode.startswith("cli:") and agent_name:
         worker_task = asyncio.create_task(_run_task_worker(settings=settings, client=client, heartbeat=heartbeat, recipe_id=recipe_id, agent_name=agent_name, agent_id=agent_id, working_dir=working_dir))
 
-    a2a_app = create_a2a_app(agent_card=card, executor=executor)
+    # Determine planning model from mode
+    plan_model = "anthropic:claude-sonnet-4-20250514"
+    if "openai" in mode:
+        plan_model = "openai:gpt-4o"
+
+    a2a_app = create_a2a_app(agent_card=card, executor=executor, plan_model=plan_model)
     config = uvicorn.Config(a2a_app.build(), host=settings.agent_host, port=settings.agent_port, log_level="info")
     server = uvicorn.Server(config)
 
@@ -332,6 +350,23 @@ def status(ctx):
     for name, entry in AGENT_REGISTRY.items():
         click.echo(f"  {name}: {entry['display_name']}")
         click.echo(f"    capabilities: {', '.join(entry['capabilities'])}")
+
+
+@main.command("repo-diagram")
+@click.option("--root", default=".", show_default=True, type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path))
+@click.option("--format", "diagram_format", default="mermaid", show_default=True, type=click.Choice(["mermaid", "tree"]))
+@click.option("--max-depth", default=3, show_default=True, type=click.IntRange(min=0))
+@click.option("--include-hidden", is_flag=True, default=False, help="Include hidden files and directories.")
+def repo_diagram(root: Path, diagram_format: str, max_depth: int, include_hidden: bool) -> None:
+    """Render a repository structure diagram."""
+    click.echo(
+        build_repo_diagram(
+            root=root,
+            format=diagram_format,
+            max_depth=max_depth,
+            include_hidden=include_hidden,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -155,6 +155,27 @@ class KrewHubClient:
 
     # --- Presence ---
 
+    async def register_agent(
+        self,
+        agent_id: str,
+        recipe_id: str,
+        display_name: str,
+        capabilities: list[str],
+        max_concurrent_tasks: int = 1,
+    ) -> dict[str, Any]:
+        resp = await self._client.post(
+            "/api/v1/agents/register",
+            json={
+                "agent_id": agent_id,
+                "recipe_id": recipe_id,
+                "display_name": display_name,
+                "capabilities": capabilities,
+                "max_concurrent_tasks": max_concurrent_tasks,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["presence"]
+
     async def heartbeat(
         self,
         agent_id: str,

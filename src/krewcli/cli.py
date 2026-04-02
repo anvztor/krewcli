@@ -39,6 +39,12 @@ def main(ctx: click.Context) -> None:
 )
 @click.option("--agent-id", default=None, help="Override agent ID")
 @click.option("--workdir", default=".", help="Working directory for agent")
+@click.option(
+    "--mode",
+    type=click.Choice(["poll", "watch"]),
+    default="poll",
+    help="Task delivery mode: poll (legacy) or watch (scheduler-assigned)",
+)
 @click.pass_context
 def start(
     ctx: click.Context,
@@ -46,6 +52,7 @@ def start(
     agent: str,
     agent_id: str | None,
     workdir: str,
+    mode: str,
 ) -> None:
     """Start the A2A agent server with heartbeat to KrewHub."""
     settings = ctx.obj["settings"]
@@ -57,6 +64,7 @@ def start(
     click.echo(f"  Agent: {info['display_name']} ({resolved_agent_id})")
     click.echo(f"  Recipe: {recipe}")
     click.echo(f"  Work dir: {resolved_workdir}")
+    click.echo(f"  Mode: {mode}")
     click.echo(f"  A2A endpoint: http://{settings.agent_host}:{settings.agent_port}")
     click.echo(f"  KrewHub: {settings.krewhub_url}")
 
@@ -66,6 +74,7 @@ def start(
         agent_name=agent,
         agent_id=resolved_agent_id,
         working_dir=resolved_workdir,
+        mode=mode,
     ))
 
 
@@ -75,33 +84,54 @@ async def _run_server(
     agent_name: str,
     agent_id: str,
     working_dir: str,
+    mode: str = "poll",
 ) -> None:
     from krewcli.a2a.server import create_a2a_app
 
     client = KrewHubClient(settings.krewhub_url, settings.api_key)
-    info = get_agent_info(agent_name)
+    repo_url, branch = await _load_recipe_context(client, recipe_id)
 
-    heartbeat = HeartbeatLoop(
-        client=client,
-        agent_id=agent_id,
-        recipe_id=recipe_id,
-        display_name=info["display_name"],
-        capabilities=info["capabilities"],
-        interval=settings.heartbeat_interval,
-    )
-    heartbeat.start()
+    node_agent = None
+    worker_task = None
 
-    worker_task = asyncio.create_task(
-        _run_task_worker(
-            settings=settings,
+    if mode == "watch":
+        from krewcli.node.agent import NodeAgent
+        node_agent = NodeAgent(
             client=client,
-            heartbeat=heartbeat,
-            recipe_id=recipe_id,
             agent_name=agent_name,
             agent_id=agent_id,
+            recipe_id=recipe_id,
             working_dir=working_dir,
+            repo_url=repo_url,
+            branch=branch,
+            heartbeat_interval=settings.heartbeat_interval,
+            krewhub_url=settings.krewhub_url,
+            api_key=settings.api_key,
         )
-    )
+        await node_agent.start()
+    else:
+        info = get_agent_info(agent_name)
+        heartbeat = HeartbeatLoop(
+            client=client,
+            agent_id=agent_id,
+            recipe_id=recipe_id,
+            display_name=info["display_name"],
+            capabilities=info["capabilities"],
+            interval=settings.heartbeat_interval,
+        )
+        heartbeat.start()
+
+        worker_task = asyncio.create_task(
+            _run_task_worker(
+                settings=settings,
+                client=client,
+                heartbeat=heartbeat,
+                recipe_id=recipe_id,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                working_dir=working_dir,
+            )
+        )
 
     a2a_app = create_a2a_app(
         host=settings.agent_host,
@@ -121,9 +151,12 @@ async def _run_server(
     try:
         await server.serve()
     finally:
-        worker_task.cancel()
-        await asyncio.gather(worker_task, return_exceptions=True)
-        await heartbeat.stop()
+        if node_agent is not None:
+            await node_agent.stop()
+        if worker_task is not None:
+            worker_task.cancel()
+            await asyncio.gather(worker_task, return_exceptions=True)
+            await heartbeat.stop()
         await client.close()
 
 

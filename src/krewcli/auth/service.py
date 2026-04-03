@@ -32,7 +32,7 @@ class AuthService:
 
     def register(self, user_input: UserCreate) -> User:
         if user_input.email in self._users_by_email:
-            raise AuthError(f"Email {user_input.email} is already registered")
+            raise AuthError("Email is already registered")
 
         user = User(
             id=f"user_{uuid.uuid4().hex}",

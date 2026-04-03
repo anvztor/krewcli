@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     heartbeat_interval: int = 15
     task_poll_interval: int = 5
     default_recipe_id: str = ""
+    default_cookbook_id: str = ""
+    jwt_secret: str = ""
+    token_expiry_minutes: int = 30
+    hook_listener_port: int = 9998
 
     model_config = {"env_prefix": "KREWCLI_"}
 

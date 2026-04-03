@@ -18,6 +18,27 @@ class KrewHubClient:
     async def close(self) -> None:
         await self._client.aclose()
 
+    # --- Cookbooks ---
+
+    async def create_cookbook(self, name: str, owner_id: str) -> dict[str, Any]:
+        resp = await self._client.post(
+            "/api/v1/cookbooks",
+            json={"name": name, "owner_id": owner_id},
+        )
+        resp.raise_for_status()
+        return resp.json()["cookbook"]
+
+    async def list_cookbooks(self, owner_id: str | None = None) -> list[dict[str, Any]]:
+        params = {"owner_id": owner_id} if owner_id else {}
+        resp = await self._client.get("/api/v1/cookbooks", params=params)
+        resp.raise_for_status()
+        return resp.json()["cookbooks"]
+
+    async def get_cookbook(self, cookbook_id: str) -> dict[str, Any]:
+        resp = await self._client.get(f"/api/v1/cookbooks/{cookbook_id}")
+        resp.raise_for_status()
+        return resp.json()
+
     # --- Recipes ---
 
     async def list_recipes(self) -> list[dict[str, Any]]:
@@ -29,6 +50,18 @@ class KrewHubClient:
         resp = await self._client.get(f"/api/v1/recipes/{recipe_id}")
         resp.raise_for_status()
         return resp.json()
+
+    async def create_recipe(
+        self, name: str, repo_url: str, created_by: str, cookbook_id: str,
+    ) -> dict[str, Any]:
+        resp = await self._client.post("/api/v1/recipes", json={
+            "name": name,
+            "repo_url": repo_url,
+            "created_by": created_by,
+            "cookbook_id": cookbook_id,
+        })
+        resp.raise_for_status()
+        return resp.json()["recipe"]
 
     # --- Bundles ---
 
@@ -86,6 +119,30 @@ class KrewHubClient:
     ) -> dict[str, Any]:
         resp = await self._client.post(
             f"/api/v1/tasks/{task_id}/events",
+            json={
+                "type": event_type,
+                "actor_id": actor_id,
+                "actor_type": "agent",
+                "body": body,
+                "facts": facts or [],
+                "code_refs": code_refs or [],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["event"]
+
+    async def post_recipe_event(
+        self,
+        recipe_id: str,
+        event_type: str,
+        actor_id: str,
+        body: str,
+        facts: list[dict] | None = None,
+        code_refs: list[dict] | None = None,
+    ) -> dict[str, Any]:
+        """Post an agent-level event (no bundle/task required)."""
+        resp = await self._client.post(
+            f"/api/v1/recipes/{recipe_id}/events",
             json={
                 "type": event_type,
                 "actor_id": actor_id,
@@ -158,7 +215,7 @@ class KrewHubClient:
     async def register_agent(
         self,
         agent_id: str,
-        recipe_id: str,
+        cookbook_id: str,
         display_name: str,
         capabilities: list[str],
         max_concurrent_tasks: int = 1,
@@ -168,7 +225,7 @@ class KrewHubClient:
             "/api/v1/agents/register",
             json={
                 "agent_id": agent_id,
-                "recipe_id": recipe_id,
+                "cookbook_id": cookbook_id,
                 "display_name": display_name,
                 "capabilities": capabilities,
                 "max_concurrent_tasks": max_concurrent_tasks,
@@ -181,7 +238,7 @@ class KrewHubClient:
     async def heartbeat(
         self,
         agent_id: str,
-        recipe_id: str,
+        cookbook_id: str,
         display_name: str,
         capabilities: list[str],
         endpoint_url: str | None = None,
@@ -191,7 +248,7 @@ class KrewHubClient:
             "/api/v1/agents/heartbeat",
             json={
                 "agent_id": agent_id,
-                "recipe_id": recipe_id,
+                "cookbook_id": cookbook_id,
                 "display_name": display_name,
                 "capabilities": capabilities,
                 "endpoint_url": endpoint_url,

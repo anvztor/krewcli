@@ -108,6 +108,12 @@ async def test_krewcli_can_run_full_flow_against_live_krewhub(
             headers={"X-API-Key": api_key},
             timeout=10.0,
         ) as api_client:
+            cookbook_response = await api_client.post(
+                "/api/v1/cookbooks",
+                json={"name": "test-cookbook", "owner_id": "qa.lead"},
+            )
+            cookbook_id = cookbook_response.json()["cookbook"]["id"]
+
             recipe_response = await api_client.post(
                 "/api/v1/recipes",
                 json={
@@ -115,6 +121,7 @@ async def test_krewcli_can_run_full_flow_against_live_krewhub(
                     "repo_url": "git@github.com:test/phase4-krewcli.git",
                     "default_branch": "feat/integration",
                     "created_by": "qa.lead",
+                    "cookbook_id": cookbook_id,
                 },
             )
             assert recipe_response.status_code == 200
@@ -136,7 +143,7 @@ async def test_krewcli_can_run_full_flow_against_live_krewhub(
             heartbeat = HeartbeatLoop(
                 client=hub_client,
                 agent_id="codex_phase4",
-                recipe_id=recipe_id,
+                cookbook_id=cookbook_id,
                 display_name="Codex Phase 4",
                 capabilities=["claim", "milestones", "digests"],
                 interval=1,

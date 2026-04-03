@@ -9,7 +9,7 @@ def test_heartbeat_current_task_property():
     heartbeat = HeartbeatLoop(
         client=client,
         agent_id="test_agent",
-        recipe_id="rec_1",
+        cookbook_id="cb_1",
         display_name="Test Agent",
         capabilities=["claim"],
         interval=60,

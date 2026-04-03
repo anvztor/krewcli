@@ -15,7 +15,7 @@ class HeartbeatLoop:
         self,
         client: KrewHubClient,
         agent_id: str,
-        recipe_id: str,
+        cookbook_id: str,
         display_name: str,
         capabilities: list[str],
         interval: int = 15,
@@ -23,7 +23,7 @@ class HeartbeatLoop:
     ) -> None:
         self._client = client
         self._agent_id = agent_id
-        self._recipe_id = recipe_id
+        self._cookbook_id = cookbook_id
         self._display_name = display_name
         self._capabilities = capabilities
         self._interval = interval
@@ -58,7 +58,7 @@ class HeartbeatLoop:
             try:
                 await self._client.heartbeat(
                     agent_id=self._agent_id,
-                    recipe_id=self._recipe_id,
+                    cookbook_id=self._cookbook_id,
                     display_name=self._display_name,
                     capabilities=self._capabilities,
                     endpoint_url=self._endpoint_url,

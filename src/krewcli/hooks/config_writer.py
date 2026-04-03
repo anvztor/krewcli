@@ -114,8 +114,11 @@ def _build_hook_commands(listener_url: str, hook_format: str) -> dict[str, list[
     for event in events:
         endpoint = f"{listener_url}/hooks/{event.lower()}"
         hooks[event] = [{
-            "type": "command",
-            "command": f'curl -s -X POST {endpoint} -H "Content-Type: application/json" -d @- 2>/dev/null || true',
+            "hooks": [{
+                "type": "command",
+                "command": f'curl -s -X POST {endpoint} -H "Content-Type: application/json" -d @- 2>/dev/null || true',
+            }],
+            "matcher": "*",
             "_krewcli": True,
         }]
 
@@ -126,5 +129,14 @@ def _is_krewcli_hook(hook: dict) -> bool:
     """Check if a hook entry was injected by KrewCLI."""
     if hook.get("_krewcli"):
         return True
+    # Check flat format (legacy)
     command = hook.get("command", "")
-    return "/hooks/" in command and "krewcli" in command.lower()
+    if "/hooks/" in command and "krewcli" in command.lower():
+        return True
+    # Check nested format
+    inner_hooks = hook.get("hooks", [])
+    for inner in inner_hooks:
+        cmd = inner.get("command", "")
+        if "/hooks/" in cmd and ("krewcli" in cmd.lower() or "9998" in cmd):
+            return True
+    return False

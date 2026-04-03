@@ -26,7 +26,10 @@ class KrewHubClient:
             json={"name": name, "owner_id": owner_id},
         )
         resp.raise_for_status()
-        return resp.json()["cookbook"]
+        data = resp.json()
+        cookbook = data["cookbook"]
+        cookbook["existed"] = data.get("existed", False)
+        return cookbook
 
     async def list_cookbooks(self, owner_id: str | None = None) -> list[dict[str, Any]]:
         params = {"owner_id": owner_id} if owner_id else {}

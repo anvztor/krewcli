@@ -73,6 +73,21 @@ async def kill_agent_session(session_name: str) -> bool:
     return result is not None
 
 
+def kill_agent_session_sync(session_name: str) -> bool:
+    """Kill a tmux agent session synchronously (safe during shutdown)."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return True
+    except Exception:
+        return False
+
+
 async def list_agent_sessions() -> list[str]:
     """List active krew tmux sessions."""
     result = await _run(
@@ -142,4 +157,7 @@ async def _run(cmd: list[str], ignore_errors: bool = False) -> str | None:
     except FileNotFoundError:
         if not ignore_errors:
             logger.warning("Command not found: %s", cmd[0])
+        return None
+    except (asyncio.CancelledError, KeyboardInterrupt, OSError):
+        logger.debug("Command %s interrupted during shutdown", cmd)
         return None

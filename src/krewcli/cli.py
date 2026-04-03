@@ -197,14 +197,33 @@ async def _run_agent(settings, recipe_id, cookbook_id, agent_id, display_name, c
     config = uvicorn.Config(app, host=settings.agent_host, port=settings.agent_port, log_level="info")
     server = uvicorn.Server(config)
 
+    loop = asyncio.get_running_loop()
+    _orig_handler = loop.get_exception_handler()
+
+    def _shutdown_exception_handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, (asyncio.InvalidStateError, OSError, BrokenPipeError)):
+            return
+        if _orig_handler:
+            _orig_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
     try:
         await server.serve()
     finally:
+        loop.set_exception_handler(_shutdown_exception_handler)
         if worker_task:
             worker_task.cancel()
             await asyncio.gather(worker_task, return_exceptions=True)
-        await heartbeat.stop()
-        await client.close()
+        try:
+            await heartbeat.stop()
+        except (asyncio.CancelledError, asyncio.InvalidStateError, OSError):
+            pass
+        try:
+            await client.close()
+        except (asyncio.CancelledError, asyncio.InvalidStateError, OSError):
+            pass
 
 
 # ── claim: one-shot task execution ──
@@ -314,17 +333,20 @@ def onboard(ctx, cookbook, cookbook_name, recipe, agent_id, port, owner):
 async def _run_onboard(settings, cookbook_id, cookbook_name, recipe_id, agent_id, owner_id, listener_url, listener_port, agents_found):
     from krewcli.hooks.config_writer import configure_claude_hooks, configure_codex_hooks, remove_claude_hooks, remove_codex_hooks
     from krewcli.hooks.listener import create_hook_listener_app
-    from krewcli.hooks.spawner import spawn_agent, kill_agent_session
+    from krewcli.hooks.spawner import spawn_agent, kill_agent_session_sync
 
     client = KrewHubClient(settings.krewhub_url, settings.api_key)
     spawned_sessions: list[str] = []
 
-    # 1. Create or verify cookbook
+    # 1. Create or reuse cookbook (server returns existing if name+owner match)
     if not cookbook_id:
         try:
             cb = await client.create_cookbook(name=cookbook_name, owner_id=owner_id)
             cookbook_id = cb["id"]
-            click.echo(f"Created cookbook: {cookbook_id}")
+            if cb.get("existed"):
+                click.echo(f"Reusing existing cookbook: {cookbook_id}")
+            else:
+                click.echo(f"Created cookbook: {cookbook_id}")
         except Exception as exc:
             click.echo(f"Failed to create cookbook: {exc}")
             await client.close()
@@ -397,19 +419,47 @@ async def _run_onboard(settings, cookbook_id, cookbook_name, recipe_id, agent_id
     config = uvicorn.Config(hook_app, host="127.0.0.1", port=listener_port, log_level="warning")
     server = uvicorn.Server(config)
 
+    # Suppress asyncio internal errors during shutdown (e.g. InvalidStateError
+    # from subprocess transport cleanup racing with event loop teardown).
+    loop = asyncio.get_running_loop()
+    _orig_handler = loop.get_exception_handler()
+
+    def _shutdown_exception_handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, (asyncio.InvalidStateError, OSError, BrokenPipeError)):
+            return  # suppress noisy transport cleanup errors
+        if _orig_handler:
+            _orig_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+
     try:
         await server.serve()
     finally:
-        # Cleanup: kill spawned sessions, remove hooks
+        loop.set_exception_handler(_shutdown_exception_handler)
+
+        # Use sync subprocess calls for tmux cleanup to avoid asyncio
+        # transport errors during event loop teardown.
         for session in spawned_sessions:
-            await kill_agent_session(session)
+            kill_agent_session_sync(session)
+
         for agent_name, _, _ in agents_found:
             if agent_name == "claude":
                 remove_claude_hooks()
             elif agent_name == "codex":
                 remove_codex_hooks()
-        await heartbeat.stop()
-        await client.close()
+
+        # Cancel heartbeat task before awaiting it.
+        try:
+            await heartbeat.stop()
+        except (asyncio.CancelledError, KeyboardInterrupt, OSError, asyncio.InvalidStateError):
+            pass
+
+        try:
+            await client.close()
+        except (asyncio.CancelledError, KeyboardInterrupt, OSError, asyncio.InvalidStateError):
+            pass
+
         click.echo("Agents stopped. Hooks removed. Goodbye.")
 
 

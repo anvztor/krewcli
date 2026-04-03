@@ -49,7 +49,7 @@ class HeartbeatLoop:
             self._task.cancel()
             try:
                 await self._task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
                 pass
             self._task = None
 

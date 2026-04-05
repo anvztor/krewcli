@@ -29,6 +29,7 @@ class KrewHubClient:
         data = resp.json()
         cookbook = data["cookbook"]
         cookbook["existed"] = data.get("existed", False)
+        cookbook["clone_url"] = data.get("clone_url", "")
         return cookbook
 
     async def list_cookbooks(self, owner_id: str | None = None) -> list[dict[str, Any]]:

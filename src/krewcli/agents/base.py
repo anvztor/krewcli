@@ -3,10 +3,19 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from krewcli.agents.models import CodeRefResult, TaskResult
+
+
+@dataclass
+class HarnessConfig:
+    """Runtime constraints for an agent harness."""
+
+    timeout: int = 300
+    max_retries: int = 0
+    allowed_tools: tuple[str, ...] = ()
 
 
 @dataclass
@@ -16,6 +25,10 @@ class AgentDeps:
     working_dir: str
     repo_url: str
     branch: str
+    system_prompt: str = ""
+    harness: HarnessConfig | None = None
+    hooks: dict[str, str] = field(default_factory=dict)
+    context: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,6 +103,7 @@ class LocalCliAgent:
         return AgentRunResult(
             output=TaskResult(
                 summary=summary,
+                full_output=combined_output,
                 files_modified=changed_files,
                 code_refs=code_refs,
                 success=success,

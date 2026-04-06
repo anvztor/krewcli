@@ -20,6 +20,7 @@ class CodeRefResult(BaseModel):
 class TaskResult(BaseModel):
     """Structured output from an agent after completing a task."""
     summary: str = Field(description="Brief summary of work done")
+    full_output: str = Field(default="", description="Full untruncated agent output")
     files_modified: list[str] = Field(default_factory=list, description="Files changed")
     facts: list[FactRefResult] = Field(default_factory=list, description="Facts discovered")
     code_refs: list[CodeRefResult] = Field(default_factory=list, description="Code references")

@@ -37,6 +37,7 @@ class SpawnResult:
     agent_id: str
     success: bool
     summary: str = ""
+    full_output: str = ""
     blocked_reason: str | None = None
     files_modified: list[str] = field(default_factory=list)
     facts: list[dict] = field(default_factory=list)
@@ -182,6 +183,7 @@ class SpawnManager:
                 agent_id="",
                 success=task_result.success,
                 summary=task_result.summary,
+                full_output=task_result.full_output,
                 blocked_reason=task_result.blocked_reason,
                 files_modified=task_result.files_modified,
                 code_refs=[
@@ -213,6 +215,7 @@ class SpawnManager:
             "agent_id": result.agent_id,
             "success": result.success,
             "summary": result.summary,
+            "full_output": result.full_output,
             "blocked_reason": result.blocked_reason,
             "files_modified": result.files_modified,
             "facts": result.facts,

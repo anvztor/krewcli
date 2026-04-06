@@ -79,6 +79,30 @@ class KrewHubClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def create_bundle(
+        self,
+        recipe_id: str,
+        prompt: str,
+        requested_by: str,
+        tasks: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Create a bundle with pre-defined tasks.
+
+        tasks: list of {"title": str, "description": str, "depends_on_task_ids": [...]}
+        Returns (bundle_dict, tasks_list).
+        """
+        resp = await self._client.post(
+            f"/api/v1/recipes/{recipe_id}/bundles",
+            json={
+                "prompt": prompt,
+                "requested_by": requested_by,
+                "tasks": tasks,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["bundle"], data["tasks"]
+
     async def list_tasks(
         self,
         recipe_id: str,
@@ -103,6 +127,17 @@ class KrewHubClient:
         return tasks
 
     # --- Tasks ---
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        """Fetch a single task by ID."""
+        resp = await self._client.get(f"/api/v1/tasks/{task_id}")
+        resp.raise_for_status()
+        return resp.json()["task"]
+
+    async def get_bundle_events(self, bundle_id: str) -> list[dict[str, Any]]:
+        """Fetch events for a bundle (includes task milestone events)."""
+        data = await self.get_bundle(bundle_id)
+        return data.get("events", [])
 
     async def claim_task(self, task_id: str, agent_id: str) -> dict[str, Any]:
         resp = await self._client.post(
@@ -215,6 +250,13 @@ class KrewHubClient:
         return resp.json()["digest"]
 
     # --- Presence ---
+
+    async def list_agents(self, cookbook_id: str | None = None) -> list[dict[str, Any]]:
+        """List online agents, optionally filtered by cookbook."""
+        params = {"cookbook_id": cookbook_id} if cookbook_id else {}
+        resp = await self._client.get("/api/v1/agents", params=params)
+        resp.raise_for_status()
+        return resp.json()["agents"]
 
     async def register_agent(
         self,

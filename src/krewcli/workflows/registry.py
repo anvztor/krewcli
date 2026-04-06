@@ -3,7 +3,7 @@
 Each workflow is a Graph whose nodes become tasks and edges become
 dependencies. The graph IS the plan — no LLM needed for decomposition.
 
-Graph.mermaid_code() renders the dependency diagram.
+graph_renderer.render_dependencies() renders the dependency flowchart.
 Node names + edges become TaskSpecs sent to krewhub.
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pydantic_graph import Graph
 
+from krewcli.workflows.graph_renderer import render_dependencies
 from krewcli.workflows.templates import (
     feature_graph,
     bugfix_graph,
@@ -32,10 +33,12 @@ class TaskSpec:
 
 @dataclass(frozen=True)
 class WorkflowSpec:
-    """Output of workflow selection: tasks + mermaid diagram."""
+    """Output of workflow selection: tasks + dependency graph."""
     tasks: list[TaskSpec]
     mermaid: str
     workflow_name: str
+    node_count: int = 0
+    edge_count: int = 0
 
 
 # Map intent keywords to workflow graphs
@@ -53,11 +56,17 @@ def list_workflows() -> list[str]:
 
 
 def get_workflow(prompt: str) -> WorkflowSpec:
-    """Select a workflow based on prompt intent and return task specs + mermaid."""
+    """Select a workflow based on prompt intent and return task specs + dependency graph."""
     name, graph = _select_graph(prompt)
-    tasks = _extract_tasks(graph, prompt)
-    mermaid = graph.mermaid_code()
-    return WorkflowSpec(tasks=tasks, mermaid=mermaid, workflow_name=name)
+    tasks = extract_tasks(graph, prompt)
+    rendered = render_dependencies(graph, tasks)
+    return WorkflowSpec(
+        tasks=tasks,
+        mermaid=rendered.mermaid,
+        workflow_name=name,
+        node_count=rendered.node_count,
+        edge_count=rendered.edge_count,
+    )
 
 
 def _select_graph(prompt: str) -> tuple[str, Graph]:
@@ -75,7 +84,7 @@ def _select_graph(prompt: str) -> tuple[str, Graph]:
     return _WORKFLOWS["default"]
 
 
-def _extract_tasks(graph: Graph, prompt: str) -> list[TaskSpec]:
+def extract_tasks(graph: Graph, prompt: str) -> list[TaskSpec]:
     """Extract TaskSpecs from graph.node_defs.
 
     node_defs keys are node names (strings), values have:

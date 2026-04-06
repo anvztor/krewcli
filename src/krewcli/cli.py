@@ -161,7 +161,12 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, hos
 
     if orchestrator:
         from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor, build_orchestrator_card
-        executor = OrchestratorExecutor()
+        krewhub_client = KrewHubClient(settings.krewhub_url, settings.api_key)
+        cookbook = settings.default_cookbook_id
+        executor = OrchestratorExecutor(
+            krewhub_client=krewhub_client,
+            cookbook_id=cookbook,
+        )
         card = build_orchestrator_card(host, port)
         return "orchestrator", executor, card, "Orchestrator", ["orchestrate", "plan", "decompose", "coordinate"]
 

@@ -192,7 +192,7 @@ async def _run_command(
 def _summarize_output(output: str, *, success: bool, name: str) -> str:
     normalized = " ".join(output.split())
     if normalized:
-        return normalized[:280]
+        return normalized
     if success:
         return f"{name} completed successfully"
     return f"{name} failed without producing output"

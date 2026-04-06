@@ -125,13 +125,14 @@ class ClaudeStreamAgent:
             ))
 
         success = process.returncode == 0 and not is_error
-        summary = output_text[:280] if output_text else (
+        summary = output_text if output_text else (
             "Claude completed successfully" if success else
-            error_text[:280] or "Claude failed"
+            error_text or "Claude failed"
         )
 
         return AgentRunResult(output=TaskResult(
             summary=summary,
+            full_output=output_text,
             files_modified=changed_files,
             code_refs=code_refs,
             success=success,

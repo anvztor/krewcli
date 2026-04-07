@@ -11,17 +11,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from krewcli.agents.base import AgentDeps, AgentRunResult
+from krewcli.agents.event_sink import (
+    EventSink,
+    KrewhubEventSink,
+    MILESTONE,
+    NullEventSink,
+)
 from krewcli.agents.models import TaskResult
 from krewcli.agents.registry import get_agent
-from krewcli.hooks.scoped_config import build_hook_env
-from krewcli.hooks.types import HookWiring
-from krewcli.hooks.writers import write_for as write_hooks_for
+
+if TYPE_CHECKING:
+    from krewcli.client.krewhub_client import KrewHubClient
 
 logger = logging.getLogger(__name__)
+
+_STREAM_EVENTS_ENABLED = os.getenv("KREWCLI_STREAM_EVENTS", "1") != "0"
 
 
 @dataclass
@@ -65,22 +75,16 @@ class SpawnManager:
         callback_url: str = "",
         api_key: str = "",
         recipe_contexts: dict[str, dict] | None = None,
-        krewhub_url: str = "",
-        workspace_dir: str = "",
+        krewhub_client: "KrewHubClient | None" = None,
     ) -> None:
         self._working_dir = working_dir
         self._repo_url = repo_url
         self._branch = branch
         self._callback_url = callback_url
         self._api_key = api_key
-        self._krewhub_url = krewhub_url
         self._recipe_contexts = recipe_contexts or {}
-        self._workspace_dir = workspace_dir or working_dir
         self._sessions: dict[str, SpawnSession] = {}
-        # Cache one HookWiring per agent type. We write each writer
-        # once at startup and reuse the result on every spawn — exactly
-        # the way vibe-island writes its global configs at first launch.
-        self._wirings: dict[str, HookWiring] = {}
+        self._krewhub_client = krewhub_client
 
     @property
     def running_count(self) -> int:
@@ -117,9 +121,6 @@ class SpawnManager:
         working_dir: str | None = None,
         repo_url: str | None = None,
         branch: str | None = None,
-        bundle_id: str = "",
-        recipe_id: str = "",
-        krewhub_url: str = "",
     ) -> bool:
         """Spawn a CLI agent to execute a task. Returns True if started."""
         if task_id in self._sessions:
@@ -133,44 +134,12 @@ class SpawnManager:
         )
         self._sessions[task_id] = session
 
-        resolved_workdir = working_dir or self._working_dir
-
-        # Resolve the per-agent hook wiring (writes the config file
-        # the first time this agent type is spawned, then caches it).
-        wiring = self._wirings.get(agent_name)
-        if wiring is None:
-            try:
-                wiring = write_hooks_for(agent_name, self._workspace_dir)
-            except Exception:  # noqa: BLE001 — never block the spawn
-                logger.exception(
-                    "SpawnManager: writer failed for %s in %s",
-                    agent_name, self._workspace_dir,
-                )
-                wiring = None
-            if wiring is not None:
-                self._wirings[agent_name] = wiring
-
-        # Build env vars consumed by `krewcli bridge`.
-        hook_env = build_hook_env(
-            task_id=task_id,
-            bundle_id=bundle_id,
-            recipe_id=recipe_id,
-            agent_id=agent_id,
-            krewhub_url=krewhub_url or self._krewhub_url,
-            api_key=self._api_key,
-        )
-        # Layer the wiring's per-agent env on top so each agent
-        # runner can find its own settings/plugin file.
-        if wiring is not None:
-            hook_env.update(wiring.env)
-
         session.task = asyncio.create_task(
             self._run_and_report(
                 session, prompt,
-                working_dir=resolved_workdir,
+                working_dir=working_dir or self._working_dir,
                 repo_url=repo_url or self._repo_url,
                 branch=branch or self._branch,
-                hook_env=hook_env,
             ),
             name=f"spawn:{agent_name}:{task_id}",
         )
@@ -186,14 +155,18 @@ class SpawnManager:
         working_dir: str = "",
         repo_url: str = "",
         branch: str = "main",
-        hook_env: dict[str, str] | None = None,
     ) -> None:
         """Execute CLI agent and report results to krewhub callback."""
-        result = await self._execute(
-            session.agent_name, prompt,
-            working_dir=working_dir, repo_url=repo_url, branch=branch,
-            hook_env=hook_env or {},
-        )
+        sink = self._build_event_sink(session)
+        try:
+            result = await self._execute(
+                session.agent_name, prompt,
+                working_dir=working_dir, repo_url=repo_url, branch=branch,
+                event_sink=sink,
+            )
+        finally:
+            await sink.flush()
+
         result.task_id = session.task_id
         result.agent_id = session.agent_id
 
@@ -207,6 +180,22 @@ class SpawnManager:
             session.task_id, result.success,
         )
 
+    def _build_event_sink(self, session: SpawnSession) -> EventSink:
+        """Construct an event sink for a spawn session.
+
+        Returns a NullEventSink unless streaming is enabled AND a
+        KrewHubClient is available. The KrewhubEventSink batches emits
+        and POSTs them to /tasks/{id}/events:batch so cookrew can
+        render tool calls and assistant replies live.
+        """
+        if not _STREAM_EVENTS_ENABLED or self._krewhub_client is None:
+            return NullEventSink()
+        return KrewhubEventSink(
+            client=self._krewhub_client,
+            task_id=session.task_id,
+            agent_id=session.agent_id,
+        )
+
     async def _execute(
         self,
         agent_name: str,
@@ -214,7 +203,7 @@ class SpawnManager:
         working_dir: str = "",
         repo_url: str = "",
         branch: str = "main",
-        hook_env: dict[str, str] | None = None,
+        event_sink: EventSink | None = None,
     ) -> SpawnResult:
         """Run the agent CLI and collect results."""
         try:
@@ -223,7 +212,7 @@ class SpawnManager:
                 working_dir=working_dir or self._working_dir,
                 repo_url=repo_url or self._repo_url,
                 branch=branch or self._branch,
-                context=hook_env or {},
+                event_sink=event_sink,
             )
             run_result: AgentRunResult = await agent.run(prompt, deps=deps)
             task_result: TaskResult = run_result.output
@@ -297,78 +286,6 @@ class SpawnManager:
         if session.task is not None and not session.task.done():
             session.task.cancel()
         return True
-
-    async def run_codegen(
-        self,
-        agent_name: str,
-        user_prompt: str,
-        agents_summary: str,
-        *,
-        working_dir: str = "",
-        repo_url: str = "",
-        branch: str = "main",
-    ) -> str | None:
-        """Run a CLI agent once with the graph-codegen prompt template.
-
-        Used by GatewayExecutor when a worker receives a planning request
-        (a message with ``bundle_id`` metadata but no ``task_id``). Unlike
-        the normal spawn path this is *synchronous-ish*: we await the
-        agent's run, capture its stdout from the returned TaskResult's
-        ``full_output``, strip markdown fences, and hand the code back
-        to the caller to POST to /bundles/{id}/graph.
-
-        No krewhub task is created. No callback is fired. The agent runs
-        in-process alongside the executor that received the request.
-
-        Args:
-            agent_name: Registry key ("claude", "codex", "bub", ...).
-            user_prompt: The original user prompt from the empty bundle.
-            agents_summary: Short human-readable list of agents available
-                in the cookbook, interpolated into the codegen template
-                so the LLM knows which task_kinds it can target.
-            working_dir/repo_url/branch: Per-recipe context, same as
-                the normal spawn path.
-
-        Returns:
-            The raw graph source code on success, or None on failure
-            (CLI crash, empty output, malformed fences).
-        """
-        from krewcli.workflows.llm_planner import CODEGEN_PROMPT, _clean_code
-
-        codegen_prompt = CODEGEN_PROMPT.format(
-            prompt=user_prompt, agents=agents_summary,
-        )
-        result = await self._execute(
-            agent_name, codegen_prompt,
-            working_dir=working_dir,
-            repo_url=repo_url,
-            branch=branch,
-            hook_env={},
-        )
-        if not result.success:
-            logger.warning(
-                "SpawnManager.run_codegen: %s failed: %s",
-                agent_name, result.blocked_reason or result.summary,
-            )
-            return None
-
-        raw_output = result.full_output or result.summary or ""
-        if not raw_output.strip():
-            logger.warning(
-                "SpawnManager.run_codegen: %s returned empty output",
-                agent_name,
-            )
-            return None
-
-        code = _clean_code(raw_output)
-        if "g.build()" not in code and "graph = " not in code:
-            logger.warning(
-                "SpawnManager.run_codegen: %s output does not look like "
-                "graph code (no g.build() or graph = assignment)",
-                agent_name,
-            )
-            return None
-        return code
 
     async def shutdown(self) -> None:
         """Cancel all running sessions."""

@@ -4,9 +4,12 @@ import asyncio
 import os
 import signal
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 from krewcli.agents.models import CodeRefResult, TaskResult
+
+if TYPE_CHECKING:
+    from krewcli.agents.event_sink import EventSink
 
 
 @dataclass
@@ -29,6 +32,7 @@ class AgentDeps:
     harness: HarnessConfig | None = None
     hooks: dict[str, str] = field(default_factory=dict)
     context: dict[str, str] = field(default_factory=dict)
+    event_sink: "EventSink | None" = None
 
 
 @dataclass

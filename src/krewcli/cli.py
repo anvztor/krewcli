@@ -50,17 +50,9 @@ def main(ctx: click.Context) -> None:
 @click.option("--model", default=None, help="Override model name")
 @click.option("--endpoint", default=None, help="Remote A2A agent URL")
 @click.option("--framework", type=click.Choice(["anthropic", "openai"]), default=None, help="pydantic-ai framework agent")
-@click.option(
-    "--planner", is_flag=True, default=False,
-    help=(
-        "Run as a graph-code planner — exposes the generate-graph A2A skill "
-        "so krewhub's PlannerDispatchController can dispatch empty bundles "
-        "for planning. The planner generates pydantic-graph code and POSTs "
-        "it back to /api/v1/bundles/{id}/graph."
-    ),
-)
+@click.option("--orchestrator", is_flag=True, default=False, help="Run as orchestrator")
 @click.pass_context
-def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent, agent, provider, model, endpoint, framework, planner):
+def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent, agent, provider, model, endpoint, framework, orchestrator):
     """Bring agents online as an A2A gateway.
 
     By default, auto-detects available CLIs (claude, codex, bub) on PATH
@@ -73,28 +65,24 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
       krewcli join --recipe ID --agents claude,codex --max-concurrent 2
 
     \b
-    Single-executor modes:
+    Legacy single-agent modes (still supported):
       krewcli join --recipe ID --agent claude
       krewcli join --recipe ID --provider anthropic
       krewcli join --recipe ID --framework anthropic
       krewcli join --recipe ID --endpoint http://my-agent:8080
-
-    \b
-    Planner mode (graph-code generator for the krewhub-driven flow):
-      krewcli join --recipe ID --cookbook CB --planner
+      krewcli join --recipe ID --orchestrator --provider anthropic
     """
     settings = ctx.obj["settings"]
     settings = settings.model_copy(update={"agent_port": port})
     resolved_workdir = os.path.abspath(workdir)
 
-    # Detect single-executor mode (one Starlette app, one card, one heartbeat).
-    # Gateway mode is the alternative — it spawns multiple agent endpoints.
-    is_legacy = any([provider, model, endpoint, framework, planner, (agent and not agents)])
+    # Detect if using legacy single-agent mode
+    is_legacy = any([provider, model, endpoint, framework, orchestrator, (agent and not agents)])
 
     if is_legacy:
         mode, executor, card, display_name, caps = _resolve_mode(
             agent=agent, provider=provider, model=model, framework=framework,
-            endpoint=endpoint, planner=planner,
+            endpoint=endpoint, orchestrator=orchestrator,
             host=settings.agent_host, port=port, working_dir=resolved_workdir,
             settings=settings,
         )
@@ -143,7 +131,7 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
     ))
 
 
-def _resolve_mode(agent, provider, model, framework, endpoint, planner, host, port, working_dir, settings):
+def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, host, port, working_dir, settings):
     if agent:
         from krewcli.a2a.executors.cli_agent import CLIExecutor, build_cli_agent_card
         executor = CLIExecutor(agent_name=agent, working_dir=working_dir)
@@ -151,7 +139,7 @@ def _resolve_mode(agent, provider, model, framework, endpoint, planner, host, po
         info = get_agent_info(agent)
         return f"cli:{agent}", executor, card, info["display_name"], info["capabilities"]
 
-    if provider:
+    if provider and not orchestrator:
         from krewcli.a2a.executors.direct_llm import DirectLLMExecutor, build_direct_llm_card
         m = model or _default_model(provider)
         executor = DirectLLMExecutor(model=f"{provider}:{m}")
@@ -171,27 +159,18 @@ def _resolve_mode(agent, provider, model, framework, endpoint, planner, host, po
         card = build_remote_card(endpoint, host, port)
         return "remote", executor, card, f"Remote ({endpoint})", ["code"]
 
-    if planner:
-        # Krewhub dispatches the planner via A2A; the planner generates graph
-        # code and POSTs it back to /bundles/{id}/graph. Krewhub's GraphRunner
-        # then runs it. Capability "generate-graph" is what
-        # PlannerDispatchController matches against.
-        from krewcli.a2a.executors.planner_agent import (
-            PlannerOrchestratorExecutor,
-            build_planner_card,
-        )
+    if orchestrator:
+        from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor, build_orchestrator_card
         krewhub_client = KrewHubClient(settings.krewhub_url, settings.api_key)
         cookbook = settings.default_cookbook_id
-        executor = PlannerOrchestratorExecutor(
+        executor = OrchestratorExecutor(
             krewhub_client=krewhub_client,
             cookbook_id=cookbook,
         )
-        card = build_planner_card(host, port)
-        return "planner", executor, card, "Planner", ["generate-graph"]
+        card = build_orchestrator_card(host, port)
+        return "orchestrator", executor, card, "Orchestrator", ["orchestrate", "plan", "decompose", "coordinate"]
 
-    raise click.UsageError(
-        "Specify one of: --agent, --provider, --framework, --endpoint, or --planner"
-    )
+    raise click.UsageError("Specify one of: --agent, --provider, --framework, --endpoint, or --orchestrator")
 
 
 def _default_model(provider):
@@ -253,21 +232,6 @@ async def _run_agent(settings, recipe_id, cookbook_id, agent_id, display_name, c
             pass
 
 
-def _gateway_agent_metadata(name: str) -> tuple[str, list[str]]:
-    """Return (display_name, capabilities) for a gateway-mounted agent.
-
-    Every worker in AGENT_REGISTRY also advertises ``generate-graph`` so
-    krewhub's PlannerDispatchController can route planning requests to
-    any of them — there's no separate planner agent, each worker's
-    GatewayExecutor handles both task execution and planning inline.
-    """
-    entry = AGENT_REGISTRY.get(name, {})
-    return (
-        entry.get("display_name", name),
-        list(entry.get("capabilities", [])),
-    )
-
-
 async def _run_gateway(
     settings, recipe_id, cookbook_id, agent_id_prefix, working_dir,
     agent_names, max_concurrent,
@@ -293,15 +257,12 @@ async def _run_gateway(
         api_key=settings.api_key,
         agent_names=agent_names,
         max_concurrent=max_concurrent,
-        krewhub_url=settings.krewhub_url,
-        workspace_dir=working_dir,
         krewhub_client=client,
-        cookbook_id=cookbook_id,
     )
 
     _click.echo(f"  Agents: {', '.join(registered_agents)}")
     for name in registered_agents:
-        _click.echo(f"    /agents/{name}")
+        _click.echo(f"    /agents/{name} -> {name} CLI")
 
     # Register each agent type separately in krewhub
     heartbeats: list[HeartbeatLoop] = []
@@ -309,7 +270,9 @@ async def _run_gateway(
         agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
         endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
 
-        display_name, capabilities = _gateway_agent_metadata(name)
+        entry = AGENT_REGISTRY.get(name, {})
+        display_name = entry.get("display_name", name)
+        capabilities = entry.get("capabilities", [])
 
         try:
             await client.register_agent(
@@ -508,7 +471,6 @@ async def _run_onboard(
         configure_git_user,
         sync_submodules,
     )
-    from krewcli.hooks.writers import write_all as write_all_hooks
     from krewcli.interactive import prompt_multi_select, prompt_single_select
 
     client = KrewHubClient(settings.krewhub_url, settings.api_key)
@@ -617,19 +579,7 @@ async def _run_onboard(
             selected_agent_indices = prompt_multi_select("Agents", available_agents)
             resolved_agent_names = [available_agents[i][1] for i in selected_agent_indices]
 
-        # 9a. Wire hooks for every supported agent at the workspace
-        # root. This is the vibe-island-style "first-launch" pass:
-        # one writer per agent, all configs land in directories we
-        # own under <workspace>, no global filesystem mutation.
-        click.echo("\nWiring hooks at workspace root:")
-        wirings = write_all_hooks(working_dir)
-        for name, wiring in wirings.items():
-            if wiring.settings_file:
-                click.echo(f"  ✓ {name}: {wiring.settings_file}")
-            else:
-                click.echo(f"  ⚠ {name}: {wiring.notes or 'no wiring'}")
-
-        # 9b. Create gateway app (also mounts /agents/planner by default)
+        # 9. Create gateway app
         app, spawn_manager, registered_agents = create_gateway_app(
             host=settings.agent_host,
             port=settings.agent_port,
@@ -641,23 +591,22 @@ async def _run_onboard(
             agent_names=resolved_agent_names,
             max_concurrent=max_concurrent,
             recipe_contexts=recipe_contexts,
-            krewhub_url=settings.krewhub_url,
-            workspace_dir=working_dir,
             krewhub_client=client,
-            cookbook_id=cookbook_id,
         )
 
         click.echo(f"\nGateway agents: {', '.join(registered_agents)}")
         for name in registered_agents:
-            click.echo(f"  /agents/{name}")
+            click.echo(f"  /agents/{name} -> {name} CLI")
 
-        # 10. Register agents and start heartbeats (workers + planner)
+        # 10. Register agents and start heartbeats
         heartbeats: list[HeartbeatLoop] = []
         for name in registered_agents:
             agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
             endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
 
-            display_name, capabilities = _gateway_agent_metadata(name)
+            entry = AGENT_REGISTRY.get(name, {})
+            display_name = entry.get("display_name", name)
+            capabilities = entry.get("capabilities", [])
 
             try:
                 await client.register_agent(
@@ -921,96 +870,6 @@ def status(ctx):
     for name, entry in AGENT_REGISTRY.items():
         click.echo(f"  {name}: {entry['display_name']}")
         click.echo(f"    capabilities: {', '.join(entry['capabilities'])}")
-
-
-def _bridge_run(source: str, hook_event_name: str) -> None:
-    """Shared body for `krewcli bridge` and the legacy alias."""
-    import json
-    import sys
-
-    from krewcli.bridge.forwarder import forward
-    from krewcli.bridge.sources import get_normalizer
-
-    raw = sys.stdin.read() or "{}"
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        payload = {"raw": raw[:2000]}
-
-    normalize = get_normalizer(source)
-    canonical = normalize(hook_event_name, payload)
-    forward(canonical)
-
-    # Codex only exposes SessionStart / UserPromptSubmit / Stop via
-    # hooks — tool calls, results, reasoning, and assistant messages
-    # live in the rollout JSONL file codex writes to $CODEX_HOME.
-    # At Stop time the rollout is complete; we replay it here so the
-    # consumer sees rich tool-level events for the session.
-    if source == "codex" and hook_event_name in ("Stop", "StopFailure", "SessionEnd"):
-        _replay_codex_rollout(canonical)
-
-    raise SystemExit(0)
-
-
-def _replay_codex_rollout(stop_event) -> None:
-    """Locate and replay the codex rollout file for a just-ended session."""
-    from krewcli.bridge.codex_rollout import find_rollout_path, replay_rollout
-    from krewcli.bridge.forwarder import forward
-
-    session_id = stop_event.session_id
-    if not session_id:
-        return
-
-    rollout = find_rollout_path(session_id)
-    if rollout is None:
-        click.echo(
-            f"krewcli bridge: no rollout found for session={session_id}",
-            err=True,
-        )
-        return
-
-    events = replay_rollout(rollout, session_id=session_id, cwd=stop_event.cwd)
-    # Drop the trailing Stop/task_complete from the rollout — the
-    # real hook-fired Stop already landed. This avoids duplication.
-    events = [e for e in events if e.hook_event_name not in ("Stop", "StopFailure")]
-
-    for ev in events:
-        forward(ev)
-
-
-@main.command("bridge")
-@click.option(
-    "--source",
-    required=True,
-    help="Agent name (claude, codex, gemini, cursor, opencode, droid)",
-)
-@click.argument("hook_event_name")
-def bridge(source: str, hook_event_name: str) -> None:
-    """krewcli's vibe-island-style hook bridge.
-
-    Reads a hook payload as JSON from stdin, normalizes it via the
-    per-source normalizer, and forwards it to krewhub via
-    `POST /api/v1/tasks/{task_id}/events` (with a fallback to
-    `/api/v1/hooks/ingest` when no task_id is bound).
-
-    Exits 0 on success and on any failure so it never blocks the
-    calling agent. Designed to be invoked once per hook event by an
-    agent's hook config.
-    """
-    _bridge_run(source, hook_event_name)
-
-
-@main.group()
-def hook() -> None:
-    """[Legacy] Hook commands. Use `krewcli bridge` instead."""
-
-
-@hook.command("ingest")
-@click.argument("hook_event_name")
-@click.option("--source", default="claude", help="Agent name (default: claude)")
-def hook_ingest(hook_event_name: str, source: str) -> None:
-    """[Deprecated alias] Equivalent to `krewcli bridge --source <source> <event>`."""
-    _bridge_run(source, hook_event_name)
 
 
 @main.command("repo-diagram")

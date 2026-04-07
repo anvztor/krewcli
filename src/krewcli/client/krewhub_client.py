@@ -186,6 +186,7 @@ class KrewHubClient:
         event_type: str,
         actor_id: str,
         body: str,
+        payload: dict | None = None,
         facts: list[dict] | None = None,
         code_refs: list[dict] | None = None,
     ) -> dict[str, Any]:
@@ -196,12 +197,34 @@ class KrewHubClient:
                 "actor_id": actor_id,
                 "actor_type": "agent",
                 "body": body,
+                "payload": payload,
                 "facts": facts or [],
                 "code_refs": code_refs or [],
             },
         )
         resp.raise_for_status()
         return resp.json()["event"]
+
+    async def post_events_batch(
+        self,
+        task_id: str,
+        events: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """POST a batch of events for a single task.
+
+        Each dict should contain: type, actor_id, body, payload (optional),
+        facts (optional), code_refs (optional). Sequence numbers are
+        assigned server-side. Used by ``KrewhubEventSink`` to stream
+        telemetry from local CLI agents with low HTTP overhead.
+        """
+        if not events:
+            return []
+        resp = await self._client.post(
+            f"/api/v1/tasks/{task_id}/events:batch",
+            json={"events": events},
+        )
+        resp.raise_for_status()
+        return resp.json().get("events", [])
 
     async def post_recipe_event(
         self,

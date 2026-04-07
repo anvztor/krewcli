@@ -257,6 +257,7 @@ async def _run_gateway(
         api_key=settings.api_key,
         agent_names=agent_names,
         max_concurrent=max_concurrent,
+        krewhub_url=settings.krewhub_url,
     )
 
     _click.echo(f"  Agents: {', '.join(registered_agents)}")
@@ -590,6 +591,7 @@ async def _run_onboard(
             agent_names=resolved_agent_names,
             max_concurrent=max_concurrent,
             recipe_contexts=recipe_contexts,
+            krewhub_url=settings.krewhub_url,
         )
 
         click.echo(f"\nGateway agents: {', '.join(registered_agents)}")
@@ -868,6 +870,66 @@ def status(ctx):
     for name, entry in AGENT_REGISTRY.items():
         click.echo(f"  {name}: {entry['display_name']}")
         click.echo(f"    capabilities: {', '.join(entry['capabilities'])}")
+
+
+@main.group()
+def hook() -> None:
+    """Hook lifecycle commands invoked by spawned agents."""
+
+
+@hook.command("ingest")
+@click.argument("hook_event_name")
+def hook_ingest(hook_event_name: str) -> None:
+    """Forward a single hook event to krewhub.
+
+    Reads the hook payload as JSON from stdin and forwards it to
+    `KREWHUB_URL/api/v1/hooks/ingest` along with the task/bundle/recipe
+    identifiers injected by SpawnManager via env vars. Designed to be
+    invoked once per hook event by the spawned agent's hook config.
+
+    Exits 0 on success and on any failure (so it never blocks the
+    agent). All errors are logged to stderr.
+    """
+    import json
+    import sys
+
+    raw = sys.stdin.read() or "{}"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = {"raw": raw[:2000]}
+
+    body = {
+        "hook_event_name": hook_event_name,
+        "task_id": os.environ.get("KREWHUB_TASK_ID") or None,
+        "bundle_id": os.environ.get("KREWHUB_BUNDLE_ID") or None,
+        "recipe_id": os.environ.get("KREWHUB_RECIPE_ID") or None,
+        "agent_id": os.environ.get("KREWHUB_AGENT_ID", "spawned-agent"),
+        "session_id": payload.get("session_id"),
+        "cwd": payload.get("cwd"),
+        "payload": payload,
+    }
+
+    krewhub_url = os.environ.get("KREWHUB_URL", "http://127.0.0.1:8420")
+    api_key = os.environ.get("KREWHUB_API_KEY", "dev-api-key")
+    url = f"{krewhub_url.rstrip('/')}/api/v1/hooks/ingest"
+
+    try:
+        resp = httpx.post(
+            url,
+            json=body,
+            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            timeout=5.0,
+        )
+        if resp.status_code >= 400:
+            click.echo(
+                f"krewcli hook ingest: {resp.status_code} {resp.text[:200]}",
+                err=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — never block the agent
+        click.echo(f"krewcli hook ingest: {exc}", err=True)
+
+    raise SystemExit(0)
 
 
 @main.command("repo-diagram")

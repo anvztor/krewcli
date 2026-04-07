@@ -103,6 +103,8 @@ class GatewayExecutor(AgentExecutor):
             working_dir=recipe_ctx.get("working_dir"),
             repo_url=recipe_ctx.get("repo_url"),
             branch=recipe_ctx.get("branch"),
+            bundle_id=metadata.get("bundle_id", ""),
+            recipe_id=metadata.get("recipe_id", ""),
         )
 
         if started:

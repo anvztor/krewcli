@@ -40,6 +40,7 @@ def create_gateway_app(
     agent_names: list[str] | None = None,
     max_concurrent: int = 1,
     recipe_contexts: dict[str, dict] | None = None,
+    krewhub_url: str = "",
 ) -> tuple[Starlette, SpawnManager, list[str]]:
     """Create a multi-agent gateway Starlette app.
 
@@ -63,6 +64,7 @@ def create_gateway_app(
         callback_url=callback_url,
         api_key=api_key,
         recipe_contexts=recipe_contexts,
+        krewhub_url=krewhub_url,
     )
 
     mounts: list[Mount | Route] = []

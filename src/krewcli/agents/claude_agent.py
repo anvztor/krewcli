@@ -25,15 +25,22 @@ class ClaudeStreamAgent:
     name: str = "Claude"
 
     async def run(self, prompt: str, *, deps: AgentDeps) -> AgentRunResult:
+        env = {**os.environ, **(deps.context or {})}
+
         args = [
             "claude",
             "--output-format", "stream-json",
             "--verbose",
             "--permission-mode", "bypassPermissions",
-            "-p", prompt,
         ]
-
-        env = {**os.environ}
+        # SpawnManager wrote a per-spawn hooks file and put its path in
+        # the env. Loading it via --settings bypasses the project trust
+        # prompt and the hook approval flow because the spawner is
+        # explicitly opting in.
+        scoped_settings = env.get("KREWCLI_CLAUDE_SETTINGS_FILE")
+        if scoped_settings:
+            args += ["--settings", scoped_settings]
+        args += ["-p", prompt]
 
         try:
             process = await asyncio.create_subprocess_exec(

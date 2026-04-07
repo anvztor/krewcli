@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from krewcli.agents.base import AgentDeps, AgentRunResult
 from krewcli.agents.models import TaskResult
 from krewcli.agents.registry import get_agent
+from krewcli.hooks.scoped_config import build_hook_env, write_claude_scoped_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,14 @@ class SpawnManager:
         callback_url: str = "",
         api_key: str = "",
         recipe_contexts: dict[str, dict] | None = None,
+        krewhub_url: str = "",
     ) -> None:
         self._working_dir = working_dir
         self._repo_url = repo_url
         self._branch = branch
         self._callback_url = callback_url
         self._api_key = api_key
+        self._krewhub_url = krewhub_url
         self._recipe_contexts = recipe_contexts or {}
         self._sessions: dict[str, SpawnSession] = {}
 
@@ -106,6 +109,9 @@ class SpawnManager:
         working_dir: str | None = None,
         repo_url: str | None = None,
         branch: str | None = None,
+        bundle_id: str = "",
+        recipe_id: str = "",
+        krewhub_url: str = "",
     ) -> bool:
         """Spawn a CLI agent to execute a task. Returns True if started."""
         if task_id in self._sessions:
@@ -119,12 +125,39 @@ class SpawnManager:
         )
         self._sessions[task_id] = session
 
+        resolved_workdir = working_dir or self._working_dir
+
+        # Write per-spawn scoped hook config (no global filesystem mutation).
+        scoped_hooks_path = None
+        if agent_name == "claude":
+            try:
+                scoped_hooks_path = write_claude_scoped_hooks(resolved_workdir)
+            except Exception:  # noqa: BLE001 — never block the spawn
+                logger.exception(
+                    "SpawnManager: failed to write scoped hook config for %s",
+                    resolved_workdir,
+                )
+
+        # Build env vars consumed by `krewcli hook ingest`.
+        hook_env = build_hook_env(
+            task_id=task_id,
+            bundle_id=bundle_id,
+            recipe_id=recipe_id,
+            agent_id=agent_id,
+            krewhub_url=krewhub_url or self._krewhub_url,
+            api_key=self._api_key,
+        )
+        if scoped_hooks_path is not None:
+            # Picked up by ClaudeStreamAgent → `--settings <path>`.
+            hook_env["KREWCLI_CLAUDE_SETTINGS_FILE"] = str(scoped_hooks_path)
+
         session.task = asyncio.create_task(
             self._run_and_report(
                 session, prompt,
-                working_dir=working_dir or self._working_dir,
+                working_dir=resolved_workdir,
                 repo_url=repo_url or self._repo_url,
                 branch=branch or self._branch,
+                hook_env=hook_env,
             ),
             name=f"spawn:{agent_name}:{task_id}",
         )
@@ -140,11 +173,13 @@ class SpawnManager:
         working_dir: str = "",
         repo_url: str = "",
         branch: str = "main",
+        hook_env: dict[str, str] | None = None,
     ) -> None:
         """Execute CLI agent and report results to krewhub callback."""
         result = await self._execute(
             session.agent_name, prompt,
             working_dir=working_dir, repo_url=repo_url, branch=branch,
+            hook_env=hook_env or {},
         )
         result.task_id = session.task_id
         result.agent_id = session.agent_id
@@ -166,6 +201,7 @@ class SpawnManager:
         working_dir: str = "",
         repo_url: str = "",
         branch: str = "main",
+        hook_env: dict[str, str] | None = None,
     ) -> SpawnResult:
         """Run the agent CLI and collect results."""
         try:
@@ -174,6 +210,7 @@ class SpawnManager:
                 working_dir=working_dir or self._working_dir,
                 repo_url=repo_url or self._repo_url,
                 branch=branch or self._branch,
+                context=hook_env or {},
             )
             run_result: AgentRunResult = await agent.run(prompt, deps=deps)
             task_result: TaskResult = run_result.output

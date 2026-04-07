@@ -61,7 +61,7 @@ class LocalCliAgent:
             completed = await _run_command(
                 self._command_builder(prompt),
                 deps.working_dir,
-                timeout=300,
+                timeout=1800,
             )
         except FileNotFoundError:
             result = TaskResult(

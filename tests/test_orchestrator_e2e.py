@@ -44,7 +44,10 @@ KREWHUB_BIN_PATH = KREWHUB_PROJECT_PATH / ".venv" / "bin" / "krewhub"
 
 def _get_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
+        try:
+            sock.bind(("127.0.0.1", 0))
+        except PermissionError as exc:
+            pytest.skip(f"local socket bind not permitted in this environment: {exc}")
         sock.listen(1)
         return int(sock.getsockname()[1])
 

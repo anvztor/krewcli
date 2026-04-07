@@ -17,7 +17,9 @@ from dataclasses import dataclass, field
 from krewcli.agents.base import AgentDeps, AgentRunResult
 from krewcli.agents.models import TaskResult
 from krewcli.agents.registry import get_agent
-from krewcli.hooks.scoped_config import build_hook_env, write_claude_scoped_hooks
+from krewcli.hooks.scoped_config import build_hook_env
+from krewcli.hooks.types import HookWiring
+from krewcli.hooks.writers import write_for as write_hooks_for
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class SpawnManager:
         api_key: str = "",
         recipe_contexts: dict[str, dict] | None = None,
         krewhub_url: str = "",
+        workspace_dir: str = "",
     ) -> None:
         self._working_dir = working_dir
         self._repo_url = repo_url
@@ -72,7 +75,12 @@ class SpawnManager:
         self._api_key = api_key
         self._krewhub_url = krewhub_url
         self._recipe_contexts = recipe_contexts or {}
+        self._workspace_dir = workspace_dir or working_dir
         self._sessions: dict[str, SpawnSession] = {}
+        # Cache one HookWiring per agent type. We write each writer
+        # once at startup and reuse the result on every spawn — exactly
+        # the way vibe-island writes its global configs at first launch.
+        self._wirings: dict[str, HookWiring] = {}
 
     @property
     def running_count(self) -> int:
@@ -127,18 +135,22 @@ class SpawnManager:
 
         resolved_workdir = working_dir or self._working_dir
 
-        # Write per-spawn scoped hook config (no global filesystem mutation).
-        scoped_hooks_path = None
-        if agent_name == "claude":
+        # Resolve the per-agent hook wiring (writes the config file
+        # the first time this agent type is spawned, then caches it).
+        wiring = self._wirings.get(agent_name)
+        if wiring is None:
             try:
-                scoped_hooks_path = write_claude_scoped_hooks(resolved_workdir)
+                wiring = write_hooks_for(agent_name, self._workspace_dir)
             except Exception:  # noqa: BLE001 — never block the spawn
                 logger.exception(
-                    "SpawnManager: failed to write scoped hook config for %s",
-                    resolved_workdir,
+                    "SpawnManager: writer failed for %s in %s",
+                    agent_name, self._workspace_dir,
                 )
+                wiring = None
+            if wiring is not None:
+                self._wirings[agent_name] = wiring
 
-        # Build env vars consumed by `krewcli hook ingest`.
+        # Build env vars consumed by `krewcli bridge`.
         hook_env = build_hook_env(
             task_id=task_id,
             bundle_id=bundle_id,
@@ -147,9 +159,10 @@ class SpawnManager:
             krewhub_url=krewhub_url or self._krewhub_url,
             api_key=self._api_key,
         )
-        if scoped_hooks_path is not None:
-            # Picked up by ClaudeStreamAgent → `--settings <path>`.
-            hook_env["KREWCLI_CLAUDE_SETTINGS_FILE"] = str(scoped_hooks_path)
+        # Layer the wiring's per-agent env on top so each agent
+        # runner can find its own settings/plugin file.
+        if wiring is not None:
+            hook_env.update(wiring.env)
 
         session.task = asyncio.create_task(
             self._run_and_report(

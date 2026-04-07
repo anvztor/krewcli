@@ -258,6 +258,7 @@ async def _run_gateway(
         agent_names=agent_names,
         max_concurrent=max_concurrent,
         krewhub_url=settings.krewhub_url,
+        workspace_dir=working_dir,
     )
 
     _click.echo(f"  Agents: {', '.join(registered_agents)}")
@@ -471,6 +472,7 @@ async def _run_onboard(
         configure_git_user,
         sync_submodules,
     )
+    from krewcli.hooks.writers import write_all as write_all_hooks
     from krewcli.interactive import prompt_multi_select, prompt_single_select
 
     client = KrewHubClient(settings.krewhub_url, settings.api_key)
@@ -579,7 +581,19 @@ async def _run_onboard(
             selected_agent_indices = prompt_multi_select("Agents", available_agents)
             resolved_agent_names = [available_agents[i][1] for i in selected_agent_indices]
 
-        # 9. Create gateway app
+        # 9a. Wire hooks for every supported agent at the workspace
+        # root. This is the vibe-island-style "first-launch" pass:
+        # one writer per agent, all configs land in directories we
+        # own under <workspace>, no global filesystem mutation.
+        click.echo("\nWiring hooks at workspace root:")
+        wirings = write_all_hooks(working_dir)
+        for name, wiring in wirings.items():
+            if wiring.settings_file:
+                click.echo(f"  ✓ {name}: {wiring.settings_file}")
+            else:
+                click.echo(f"  ⚠ {name}: {wiring.notes or 'no wiring'}")
+
+        # 9b. Create gateway app
         app, spawn_manager, registered_agents = create_gateway_app(
             host=settings.agent_host,
             port=settings.agent_port,
@@ -592,6 +606,7 @@ async def _run_onboard(
             max_concurrent=max_concurrent,
             recipe_contexts=recipe_contexts,
             krewhub_url=settings.krewhub_url,
+            workspace_dir=working_dir,
         )
 
         click.echo(f"\nGateway agents: {', '.join(registered_agents)}")
@@ -872,26 +887,13 @@ def status(ctx):
         click.echo(f"    capabilities: {', '.join(entry['capabilities'])}")
 
 
-@main.group()
-def hook() -> None:
-    """Hook lifecycle commands invoked by spawned agents."""
-
-
-@hook.command("ingest")
-@click.argument("hook_event_name")
-def hook_ingest(hook_event_name: str) -> None:
-    """Forward a single hook event to krewhub.
-
-    Reads the hook payload as JSON from stdin and forwards it to
-    `KREWHUB_URL/api/v1/hooks/ingest` along with the task/bundle/recipe
-    identifiers injected by SpawnManager via env vars. Designed to be
-    invoked once per hook event by the spawned agent's hook config.
-
-    Exits 0 on success and on any failure (so it never blocks the
-    agent). All errors are logged to stderr.
-    """
+def _bridge_run(source: str, hook_event_name: str) -> None:
+    """Shared body for `krewcli bridge` and the legacy alias."""
     import json
     import sys
+
+    from krewcli.bridge.forwarder import forward
+    from krewcli.bridge.sources import get_normalizer
 
     raw = sys.stdin.read() or "{}"
     try:
@@ -899,37 +901,80 @@ def hook_ingest(hook_event_name: str) -> None:
     except json.JSONDecodeError:
         payload = {"raw": raw[:2000]}
 
-    body = {
-        "hook_event_name": hook_event_name,
-        "task_id": os.environ.get("KREWHUB_TASK_ID") or None,
-        "bundle_id": os.environ.get("KREWHUB_BUNDLE_ID") or None,
-        "recipe_id": os.environ.get("KREWHUB_RECIPE_ID") or None,
-        "agent_id": os.environ.get("KREWHUB_AGENT_ID", "spawned-agent"),
-        "session_id": payload.get("session_id"),
-        "cwd": payload.get("cwd"),
-        "payload": payload,
-    }
+    normalize = get_normalizer(source)
+    canonical = normalize(hook_event_name, payload)
+    forward(canonical)
 
-    krewhub_url = os.environ.get("KREWHUB_URL", "http://127.0.0.1:8420")
-    api_key = os.environ.get("KREWHUB_API_KEY", "dev-api-key")
-    url = f"{krewhub_url.rstrip('/')}/api/v1/hooks/ingest"
-
-    try:
-        resp = httpx.post(
-            url,
-            json=body,
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-            timeout=5.0,
-        )
-        if resp.status_code >= 400:
-            click.echo(
-                f"krewcli hook ingest: {resp.status_code} {resp.text[:200]}",
-                err=True,
-            )
-    except Exception as exc:  # noqa: BLE001 — never block the agent
-        click.echo(f"krewcli hook ingest: {exc}", err=True)
+    # Codex only exposes SessionStart / UserPromptSubmit / Stop via
+    # hooks — tool calls, results, reasoning, and assistant messages
+    # live in the rollout JSONL file codex writes to $CODEX_HOME.
+    # At Stop time the rollout is complete; we replay it here so the
+    # consumer sees rich tool-level events for the session.
+    if source == "codex" and hook_event_name in ("Stop", "StopFailure", "SessionEnd"):
+        _replay_codex_rollout(canonical)
 
     raise SystemExit(0)
+
+
+def _replay_codex_rollout(stop_event) -> None:
+    """Locate and replay the codex rollout file for a just-ended session."""
+    from krewcli.bridge.codex_rollout import find_rollout_path, replay_rollout
+    from krewcli.bridge.forwarder import forward
+
+    session_id = stop_event.session_id
+    if not session_id:
+        return
+
+    rollout = find_rollout_path(session_id)
+    if rollout is None:
+        click.echo(
+            f"krewcli bridge: no rollout found for session={session_id}",
+            err=True,
+        )
+        return
+
+    events = replay_rollout(rollout, session_id=session_id, cwd=stop_event.cwd)
+    # Drop the trailing Stop/task_complete from the rollout — the
+    # real hook-fired Stop already landed. This avoids duplication.
+    events = [e for e in events if e.hook_event_name not in ("Stop", "StopFailure")]
+
+    for ev in events:
+        forward(ev)
+
+
+@main.command("bridge")
+@click.option(
+    "--source",
+    required=True,
+    help="Agent name (claude, codex, gemini, cursor, opencode, droid)",
+)
+@click.argument("hook_event_name")
+def bridge(source: str, hook_event_name: str) -> None:
+    """krewcli's vibe-island-style hook bridge.
+
+    Reads a hook payload as JSON from stdin, normalizes it via the
+    per-source normalizer, and forwards it to krewhub via
+    `POST /api/v1/tasks/{task_id}/events` (with a fallback to
+    `/api/v1/hooks/ingest` when no task_id is bound).
+
+    Exits 0 on success and on any failure so it never blocks the
+    calling agent. Designed to be invoked once per hook event by an
+    agent's hook config.
+    """
+    _bridge_run(source, hook_event_name)
+
+
+@main.group()
+def hook() -> None:
+    """[Legacy] Hook commands. Use `krewcli bridge` instead."""
+
+
+@hook.command("ingest")
+@click.argument("hook_event_name")
+@click.option("--source", default="claude", help="Agent name (default: claude)")
+def hook_ingest(hook_event_name: str, source: str) -> None:
+    """[Deprecated alias] Equivalent to `krewcli bridge --source <source> <event>`."""
+    _bridge_run(source, hook_event_name)
 
 
 @main.command("repo-diagram")

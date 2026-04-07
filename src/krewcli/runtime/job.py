@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import logging
 
-from krewcli.agents.base import AgentDeps, LocalCliAgent
+from krewcli.agents.base import AgentDeps
 from krewcli.agents.registry import get_agent, get_agent_info
 from krewcli.runtime.interface import (
-    AgentRuntimeInterface,
     RuntimeHealth,
     TaskRunResult,
     TaskRunSpec,
@@ -31,6 +30,7 @@ class JobRuntime:
             working_dir=spec.working_dir,
             repo_url=spec.repo_url,
             branch=spec.branch,
+            context=_stringify_context(spec.context),
         )
 
         prompt = (
@@ -80,3 +80,12 @@ class JobRuntime:
 
     def capabilities(self) -> list[str]:
         return list(self._info["capabilities"])
+
+
+def _stringify_context(context: dict[object, object]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in context.items():
+        if value is None:
+            continue
+        out[str(key)] = str(value)
+    return out

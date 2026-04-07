@@ -27,6 +27,7 @@ Execution model:
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import os
 from dataclasses import dataclass
@@ -36,6 +37,11 @@ from krewcli.agents import base
 from krewcli.agents.base import AgentDeps, AgentRunResult
 from krewcli.agents.models import CodeRefResult, TaskResult
 from krewcli.bridge.codex_watcher import CodexRolloutWatcher
+
+_ROLLOUT_SUMMARY_HINT: ContextVar[Path | None] = ContextVar(
+    "codex_rollout_summary_hint",
+    default=None,
+)
 
 
 @dataclass
@@ -104,11 +110,17 @@ class CodexRolloutAgent:
         returncode = process.returncode if process else -1
         success = returncode == 0
 
-        summary = await _extract_summary_from_rollout(
-            rollout_path=watcher.latest_rollout_path,
-            fallback_stderr=stderr_bytes.decode(errors="replace"),
-            success=success,
+        token = _ROLLOUT_SUMMARY_HINT.set(
+            getattr(watcher, "latest_rollout_path", None)
         )
+        try:
+            summary = await _extract_summary_from_latest_rollout(
+                codex_home=codex_home,
+                fallback_stderr=stderr_bytes.decode(errors="replace"),
+                success=success,
+            )
+        finally:
+            _ROLLOUT_SUMMARY_HINT.reset(token)
 
         return await _build_result(
             deps=deps,
@@ -120,7 +132,11 @@ class CodexRolloutAgent:
 
 def _should_use_rollout_watcher(deps: AgentDeps) -> bool:
     context = deps.context or {}
-    return bool(context.get("CODEX_HOME") and context.get("KREWHUB_TASK_ID"))
+    raw = str(context.get("KREWCLI_CODEX_DISABLE_ROLLOUT_WATCHER") or "").strip().lower()
+    if raw in {"1", "true", "yes"}:
+        return False
+    codex_home = str(context.get("CODEX_HOME") or os.environ.get("CODEX_HOME") or "").strip()
+    return bool(codex_home)
 
 
 async def _run_via_command_runner(
@@ -244,6 +260,39 @@ async def _extract_summary_from_rollout(
     if final_status == "task_complete":
         return "Codex completed successfully"
     return _fallback(fallback_stderr, success)
+
+
+async def _extract_summary_from_latest_rollout(
+    *,
+    codex_home: str,
+    fallback_stderr: str,
+    success: bool,
+) -> str:
+    rollout_path = _ROLLOUT_SUMMARY_HINT.get()
+    if rollout_path is None:
+        rollout_path = _find_latest_rollout_path(codex_home)
+    return await _extract_summary_from_rollout(
+        rollout_path=rollout_path,
+        fallback_stderr=fallback_stderr,
+        success=success,
+    )
+
+
+def _find_latest_rollout_path(codex_home: str) -> Path | None:
+    sessions = Path(codex_home) / "sessions"
+    if not sessions.exists():
+        return None
+
+    try:
+        candidates = sorted(
+            sessions.rglob("rollout-*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+
+    return candidates[0] if candidates else None
 
 
 def _fallback(stderr: str, success: bool) -> str:

@@ -98,6 +98,10 @@ class CodexRolloutWatcher:
         self._env_snapshot = collect_env()
         self._tty_snapshot = detect_tty()
         self._latest_activity_path: Path | None = None
+        self._should_forward = any(
+            str(env.get(key) or "").strip()
+            for key in ("KREWHUB_TASK_ID", "KREWHUB_RECIPE_ID", "KREWHUB_BUNDLE_ID")
+        )
 
     @property
     def latest_rollout_path(self) -> Path | None:
@@ -213,7 +217,7 @@ class CodexRolloutWatcher:
         finally:
             fd.close()
 
-        forwarded_any = False
+        saw_new_content = bool(lines)
         for line in lines:
             line = line.strip()
             if not line:
@@ -225,12 +229,13 @@ class CodexRolloutWatcher:
             ev = self._item_to_canonical(state, item)
             if ev is None:
                 continue
+            if not self._should_forward:
+                continue
             try:
                 forward(ev, env=self._env)
-                forwarded_any = True
             except Exception:  # noqa: BLE001
                 logger.exception("codex watcher: forward failed")
-        return forwarded_any
+        return saw_new_content
 
     def _item_to_canonical(
         self,

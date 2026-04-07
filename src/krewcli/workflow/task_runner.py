@@ -8,7 +8,7 @@ from krewcli.agents.models import TaskResult
 from krewcli.agents.registry import get_agent
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.presence.heartbeat import HeartbeatLoop
-from krewcli.runtime.interface import AgentRuntimeInterface, TaskRunSpec, TaskRunResult
+from krewcli.runtime.interface import AgentRuntimeInterface, TaskRunSpec
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class TaskRunner:
             working_dir=self._working_dir,
             repo_url=self._repo_url,
             branch=self._branch,
+            context=task_data.get("context") or {},
         )
 
         run_result = await self._runtime.run_task(spec)
@@ -106,6 +107,7 @@ class TaskRunner:
             working_dir=self._working_dir,
             repo_url=self._repo_url,
             branch=self._branch,
+            context=_stringify_context(task_data.get("context") or {}),
         )
 
         prompt = (
@@ -151,3 +153,12 @@ class TaskRunner:
                 blocked_reason=task_result.blocked_reason or "Agent reported failure",
             )
             logger.warning("Task %s blocked: %s", task_id, task_result.blocked_reason)
+
+
+def _stringify_context(context: dict[object, object]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in context.items():
+        if value is None:
+            continue
+        out[str(key)] = str(value)
+    return out

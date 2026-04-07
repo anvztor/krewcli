@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from krewcli.agents.base import AgentDeps, AgentRunResult
 from krewcli.agents.models import CodeRefResult, FactRefResult
+from krewcli.agents.models import TaskResult
 from krewcli.runtime.interface import (
-    AgentRuntimeInterface,
     RuntimeHealth,
     TaskRunResult,
     TaskRunSpec,
@@ -110,3 +111,36 @@ async def test_mock_runtime_execution():
     assert result.success
     assert result.summary == "Task completed"
     assert mock.last_spec == spec
+
+
+@pytest.mark.asyncio
+async def test_job_runtime_passes_stringified_context(monkeypatch):
+    captured: dict[str, AgentDeps] = {}
+
+    class FakeAgent:
+        async def run(self, prompt: str, *, deps: AgentDeps) -> AgentRunResult:
+            assert "Complete this task: Test task" in prompt
+            captured["deps"] = deps
+            return AgentRunResult(output=TaskResult(summary="ok", success=True))
+
+    monkeypatch.setattr("krewcli.runtime.job.get_agent", lambda _name: FakeAgent())
+
+    runtime = JobRuntime("codex")
+    result = await runtime.run_task(
+        TaskRunSpec(
+            task_id="t1",
+            title="Test task",
+            working_dir="/tmp",
+            context={
+                "CODEX_HOME": "/tmp/codex-home",
+                "attempt": 2,
+                "skip": None,
+            },
+        )
+    )
+
+    assert result.success is True
+    assert captured["deps"].context == {
+        "CODEX_HOME": "/tmp/codex-home",
+        "attempt": "2",
+    }

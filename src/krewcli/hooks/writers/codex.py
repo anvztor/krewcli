@@ -88,13 +88,19 @@ def write(workspace_dir: str) -> HookWiring:
     return HookWiring(
         source="codex",
         settings_file=config_toml.resolve(),
+        # Intentionally DO NOT set CODEX_HOME in the spawn env.
+        # Isolating codex breaks auth (the isolated dir has no
+        # auth.json), and vibe-island's CodexSessionWatcher also
+        # tails the user's GLOBAL ~/.codex/sessions/ rather than
+        # an isolated one. The CodexRolloutAgent points the watcher
+        # at the user's real codex home; the files written here are
+        # kept as documentation only.
         env={
-            # Codex honors $CODEX_HOME as its config dir — this
-            # isolates hooks to our workspace without touching
-            # the user's global ~/.codex.
-            "CODEX_HOME": str(codex_dir.resolve()),
             "KREWCLI_CODEX_CONFIG_FILE": str(config_toml.resolve()),
         },
         files_written=files_written,
-        notes="codex_hooks feature flag + nested claude-shape hooks.json",
+        notes=(
+            "config/hooks written for documentation; codex itself "
+            "reads the user's global ~/.codex (auth lives there)"
+        ),
     )

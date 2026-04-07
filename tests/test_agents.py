@@ -59,10 +59,18 @@ async def test_codex_agent_run_uses_command_runner_without_hook_context(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_codex_agent_run_uses_rollout_watcher_with_hook_context(monkeypatch, tmp_path):
+async def test_codex_agent_run_uses_rollout_watcher_with_task_context(monkeypatch, tmp_path):
+    """With KREWHUB_TASK_ID bound, the agent takes the rollout-watcher path.
+
+    We intentionally do NOT set CODEX_HOME — isolating codex breaks auth
+    and we tail the user's real ~/.codex the same way vibe-island does.
+    """
+    from pathlib import Path as _Path
+
     calls: list[tuple[tuple[str, ...], str, int]] = []
     spawn_calls: list[tuple[tuple[str, ...], dict]] = []
     watcher_events: list[str] = []
+    home = _Path.home()
 
     async def fake_run_command(
         args: list[str],
@@ -87,11 +95,8 @@ async def test_codex_agent_run_uses_rollout_watcher_with_hook_context(monkeypatc
 
     class FakeWatcher:
         def __init__(self, *, codex_home: str, env: dict[str, str], session_id_hint: str | None = None):
-            assert codex_home == str(tmp_path / ".codex")
-            assert env == {
-                "CODEX_HOME": str(tmp_path / ".codex"),
-                "KREWHUB_TASK_ID": "task-123",
-            }
+            assert codex_home == str(home / ".codex")
+            assert env == {"KREWHUB_TASK_ID": "task-123"}
             assert session_id_hint is None
             self.latest_rollout_path = tmp_path / "rollout.jsonl"
 
@@ -111,6 +116,7 @@ async def test_codex_agent_run_uses_rollout_watcher_with_hook_context(monkeypatc
         assert success is True
         return "Forwarded rollout summary"
 
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(base, "_run_command", fake_run_command)
     monkeypatch.setattr(codex_agent, "CodexRolloutWatcher", FakeWatcher)
     monkeypatch.setattr(codex_agent.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
@@ -123,10 +129,7 @@ async def test_codex_agent_run_uses_rollout_watcher_with_hook_context(monkeypatc
             working_dir=".",
             repo_url="",
             branch="main",
-            context={
-                "CODEX_HOME": str(tmp_path / ".codex"),
-                "KREWHUB_TASK_ID": "task-123",
-            },
+            context={"KREWHUB_TASK_ID": "task-123"},
         ),
     )
 
@@ -142,7 +145,9 @@ async def test_codex_agent_run_uses_rollout_watcher_with_hook_context(monkeypatc
         "stream it",
     )
     assert spawn_calls[0][1]["cwd"] == "."
+    # KREWHUB_TASK_ID flows through; CODEX_HOME is deliberately stripped.
     assert spawn_calls[0][1]["env"]["KREWHUB_TASK_ID"] == "task-123"
+    assert "CODEX_HOME" not in spawn_calls[0][1]["env"]
     assert watcher_events == ["start", "stop"]
     assert calls == [
         (("git", "status", "--short"), ".", 30),
@@ -152,11 +157,14 @@ async def test_codex_agent_run_uses_rollout_watcher_with_hook_context(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_codex_agent_run_uses_rollout_watcher_with_environment_codex_home(
-    monkeypatch,
-    tmp_path,
-):
+async def test_codex_agent_strips_codex_home_from_spawn_env(monkeypatch, tmp_path):
+    """Even if CODEX_HOME leaks into the process env, we must strip it
+    before spawning codex so auth (which lives in the global ~/.codex)
+    still works."""
+    from pathlib import Path as _Path
+
     spawn_calls: list[tuple[tuple[str, ...], dict]] = []
+    home = _Path.home()
 
     class FakeProcess:
         returncode = 0
@@ -166,9 +174,9 @@ async def test_codex_agent_run_uses_rollout_watcher_with_environment_codex_home(
 
     class FakeWatcher:
         def __init__(self, *, codex_home: str, env: dict[str, str], session_id_hint: str | None = None):
-            assert codex_home == str(tmp_path / ".codex")
-            assert env == {}
-            assert session_id_hint is None
+            # Watcher is pointed at the user's real home, never the leaked env var.
+            assert codex_home == str(home / ".codex")
+            assert "CODEX_HOME" not in env
             self.latest_rollout_path = tmp_path / "rollout.jsonl"
 
         async def start(self) -> None:
@@ -182,10 +190,9 @@ async def test_codex_agent_run_uses_rollout_watcher_with_environment_codex_home(
         return FakeProcess()
 
     async def fake_extract_summary_from_rollout(*, rollout_path, fallback_stderr: str, success: bool) -> str:
-        assert rollout_path == tmp_path / "rollout.jsonl"
-        assert fallback_stderr == ""
+        del rollout_path, fallback_stderr
         assert success is True
-        return "Summary from environment rollout"
+        return "ok"
 
     async def fake_run_command(
         args: list[str],
@@ -202,28 +209,24 @@ async def test_codex_agent_run_uses_rollout_watcher_with_environment_codex_home(
             return CommandResult(0, "", "")
         raise AssertionError(f"unexpected command: {args}")
 
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setenv("CODEX_HOME", "/some/leaked/path")
     monkeypatch.setattr(base, "_run_command", fake_run_command)
     monkeypatch.setattr(codex_agent, "CodexRolloutWatcher", FakeWatcher)
     monkeypatch.setattr(codex_agent.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     monkeypatch.setattr(codex_agent, "_extract_summary_from_rollout", fake_extract_summary_from_rollout)
 
     agent = create_codex_agent()
-    result = await agent.run(
+    await agent.run(
         "stream it",
-        deps=AgentDeps(working_dir=".", repo_url="", branch="main"),
+        deps=AgentDeps(
+            working_dir=".",
+            repo_url="",
+            branch="main",
+            context={"KREWHUB_TASK_ID": "task-strip"},
+        ),
     )
 
-    assert result.output.success is True
-    assert result.output.summary == "Summary from environment rollout"
-    assert spawn_calls[0][0] == (
-        "codex",
-        "exec",
-        "--skip-git-repo-check",
-        "--full-auto",
-        "stream it",
-    )
-    assert spawn_calls[0][1]["env"]["CODEX_HOME"] == str(tmp_path / ".codex")
+    assert "CODEX_HOME" not in spawn_calls[0][1]["env"]
 
 
 @pytest.mark.asyncio

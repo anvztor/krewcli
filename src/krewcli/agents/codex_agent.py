@@ -51,7 +51,15 @@ class CodexRolloutAgent:
     name: str = "Codex"
 
     async def run(self, prompt: str, *, deps: AgentDeps) -> AgentRunResult:
-        env = {**os.environ, **(deps.context or {})}
+        # Deliberately drop CODEX_HOME from the spawn env — we do
+        # NOT want codex to look at our workspace-local `.codex`
+        # because it has no auth.json and would 401 on every call.
+        # Vibe-island's CodexSessionWatcher tails the user's real
+        # global ~/.codex/sessions/ for the same reason.
+        base_env = {k: v for k, v in (deps.context or {}).items() if k != "CODEX_HOME"}
+        env = {**os.environ, **base_env}
+        env.pop("CODEX_HOME", None)
+
         args = [
             "codex",
             "exec",
@@ -63,10 +71,9 @@ class CodexRolloutAgent:
         if not _should_use_rollout_watcher(deps):
             return await _run_via_command_runner(args, deps=deps)
 
-        # Resolve CODEX_HOME so the watcher sees the same rollouts
-        # as the codex subprocess. SpawnManager sets this via the
-        # hook writer when it wires codex, but fall back gracefully.
-        codex_home = env.get("CODEX_HOME") or str(Path.home() / ".codex")
+        # Watcher points at the user's real ~/.codex/sessions/ —
+        # the same place codex will write the rollout for this spawn.
+        codex_home = str(Path.home() / ".codex")
 
         watcher = CodexRolloutWatcher(
             codex_home=codex_home,
@@ -135,8 +142,10 @@ def _should_use_rollout_watcher(deps: AgentDeps) -> bool:
     raw = str(context.get("KREWCLI_CODEX_DISABLE_ROLLOUT_WATCHER") or "").strip().lower()
     if raw in {"1", "true", "yes"}:
         return False
-    codex_home = str(context.get("CODEX_HOME") or os.environ.get("CODEX_HOME") or "").strip()
-    return bool(codex_home)
+    # Any spawn bound to a task gets the watcher — we don't require
+    # CODEX_HOME anymore because we intentionally let codex use its
+    # global home for auth, and the watcher tails ~/.codex directly.
+    return bool(context.get("KREWHUB_TASK_ID"))
 
 
 async def _run_via_command_runner(

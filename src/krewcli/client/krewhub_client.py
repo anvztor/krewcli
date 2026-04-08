@@ -103,6 +103,39 @@ class KrewHubClient:
         data = resp.json()
         return data["bundle"], data["tasks"]
 
+    async def attach_graph(
+        self,
+        bundle_id: str,
+        code: str,
+        *,
+        created_by: str = "orchestrator",
+    ) -> dict[str, Any]:
+        """Attach a validated pydantic-graph artifact to an existing bundle.
+
+        POST /api/v1/bundles/{id}/graph. Krewhub validates the code via its
+        sandbox, renders mermaid, creates one task per graph node with
+        dependencies, and persists code+mermaid on the bundle row. The
+        GraphRunnerController then picks the bundle up on its next reconcile.
+
+        Args:
+            bundle_id: existing bundle id (must not already have graph_code).
+            code: pydantic-graph source from the orchestrator.
+            created_by: actor id stamped on the PLAN event.
+
+        Returns:
+            {"bundle": {...}, "tasks": [...]} as returned by the route.
+
+        Raises:
+            httpx.HTTPStatusError: 404 if bundle missing, 409 if already
+                attached, 422 if the sandbox rejects the code.
+        """
+        resp = await self._client.post(
+            f"/api/v1/bundles/{bundle_id}/graph",
+            json={"code": code, "created_by": created_by},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def list_tasks(
         self,
         recipe_id: str,

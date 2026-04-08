@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from krewcli.a2a.executors.cli_agent import CLIExecutor
-from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor
 from krewcli.a2a.executors.planner_agent import PlannerOrchestratorExecutor
 from krewcli.a2a.executors.remote_agent import RemoteExecutor
 from krewcli.cli import _resolve_mode
@@ -30,7 +29,7 @@ def _resolve(**overrides):
     """Call _resolve_mode with sensible defaults; override per test."""
     kwargs = dict(
         agent=None, provider=None, model=None, framework=None,
-        endpoint=None, orchestrator=False, planner=False,
+        endpoint=None, planner=False,
         host="127.0.0.1", port=9999, working_dir="/tmp",
         settings=_settings(),
     )
@@ -73,13 +72,6 @@ class TestPlannerBranch:
 
 
 class TestExistingBranches:
-    def test_orchestrator_branch_still_works(self):
-        mode, executor, _card, display_name, caps = _resolve(orchestrator=True)
-        assert mode == "orchestrator"
-        assert isinstance(executor, OrchestratorExecutor)
-        assert display_name == "Orchestrator"
-        assert "orchestrate" in caps
-
     def test_endpoint_branch(self):
         mode, executor, _card, display_name, caps = _resolve(
             endpoint="http://remote/api",
@@ -112,15 +104,6 @@ class TestMutualExclusion:
             _resolve()
         msg = str(exc_info.value)
         assert "--planner" in msg
-        assert "--orchestrator" in msg
         assert "--agent" in msg
-
-    def test_planner_takes_precedence_over_orchestrator(self):
-        # If both flags are set (operator error), planner branch wins
-        # because it appears first in _resolve_mode. This documents the
-        # current behavior so a future refactor doesn't silently flip it.
-        mode, executor, _card, _display, _caps = _resolve(
-            planner=True, orchestrator=True,
-        )
-        assert mode == "planner"
-        assert isinstance(executor, PlannerOrchestratorExecutor)
+        # Legacy --orchestrator was removed; the error must not advertise it.
+        assert "--orchestrator" not in msg

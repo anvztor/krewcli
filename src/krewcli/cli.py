@@ -50,7 +50,6 @@ def main(ctx: click.Context) -> None:
 @click.option("--model", default=None, help="Override model name")
 @click.option("--endpoint", default=None, help="Remote A2A agent URL")
 @click.option("--framework", type=click.Choice(["anthropic", "openai"]), default=None, help="pydantic-ai framework agent")
-@click.option("--orchestrator", is_flag=True, default=False, help="Run as orchestrator")
 @click.option(
     "--planner", is_flag=True, default=False,
     help=(
@@ -61,7 +60,7 @@ def main(ctx: click.Context) -> None:
     ),
 )
 @click.pass_context
-def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent, agent, provider, model, endpoint, framework, orchestrator, planner):
+def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent, agent, provider, model, endpoint, framework, planner):
     """Bring agents online as an A2A gateway.
 
     By default, auto-detects available CLIs (claude, codex, bub) on PATH
@@ -74,29 +73,28 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
       krewcli join --recipe ID --agents claude,codex --max-concurrent 2
 
     \b
-    Legacy single-agent modes (still supported):
+    Single-executor modes:
       krewcli join --recipe ID --agent claude
       krewcli join --recipe ID --provider anthropic
       krewcli join --recipe ID --framework anthropic
       krewcli join --recipe ID --endpoint http://my-agent:8080
-      krewcli join --recipe ID --orchestrator --provider anthropic
 
     \b
-    Planner mode (graph-code generator):
+    Planner mode (graph-code generator for the krewhub-driven flow):
       krewcli join --recipe ID --cookbook CB --planner
     """
     settings = ctx.obj["settings"]
     settings = settings.model_copy(update={"agent_port": port})
     resolved_workdir = os.path.abspath(workdir)
 
-    # Detect if using legacy single-agent mode (planner shares this code path —
-    # it's a single-executor agent, not a multi-agent gateway).
-    is_legacy = any([provider, model, endpoint, framework, orchestrator, planner, (agent and not agents)])
+    # Detect single-executor mode (one Starlette app, one card, one heartbeat).
+    # Gateway mode is the alternative — it spawns multiple agent endpoints.
+    is_legacy = any([provider, model, endpoint, framework, planner, (agent and not agents)])
 
     if is_legacy:
         mode, executor, card, display_name, caps = _resolve_mode(
             agent=agent, provider=provider, model=model, framework=framework,
-            endpoint=endpoint, orchestrator=orchestrator, planner=planner,
+            endpoint=endpoint, planner=planner,
             host=settings.agent_host, port=port, working_dir=resolved_workdir,
             settings=settings,
         )
@@ -145,7 +143,7 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
     ))
 
 
-def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, planner, host, port, working_dir, settings):
+def _resolve_mode(agent, provider, model, framework, endpoint, planner, host, port, working_dir, settings):
     if agent:
         from krewcli.a2a.executors.cli_agent import CLIExecutor, build_cli_agent_card
         executor = CLIExecutor(agent_name=agent, working_dir=working_dir)
@@ -153,7 +151,7 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, pla
         info = get_agent_info(agent)
         return f"cli:{agent}", executor, card, info["display_name"], info["capabilities"]
 
-    if provider and not orchestrator:
+    if provider:
         from krewcli.a2a.executors.direct_llm import DirectLLMExecutor, build_direct_llm_card
         m = model or _default_model(provider)
         executor = DirectLLMExecutor(model=f"{provider}:{m}")
@@ -174,10 +172,10 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, pla
         return "remote", executor, card, f"Remote ({endpoint})", ["code"]
 
     if planner:
-        # New unified flow: krewhub dispatches the planner via A2A; planner
-        # generates graph code and POSTs back to /bundles/{id}/graph. Krewhub's
-        # GraphRunnerController then runs it. Capability "generate-graph" is
-        # what PlannerDispatchController matches against.
+        # Krewhub dispatches the planner via A2A; the planner generates graph
+        # code and POSTs it back to /bundles/{id}/graph. Krewhub's GraphRunner
+        # then runs it. Capability "generate-graph" is what
+        # PlannerDispatchController matches against.
         from krewcli.a2a.executors.planner_agent import (
             PlannerOrchestratorExecutor,
             build_planner_card,
@@ -191,19 +189,8 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, pla
         card = build_planner_card(host, port)
         return "planner", executor, card, "Planner", ["generate-graph"]
 
-    if orchestrator:
-        from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor, build_orchestrator_card
-        krewhub_client = KrewHubClient(settings.krewhub_url, settings.api_key)
-        cookbook = settings.default_cookbook_id
-        executor = OrchestratorExecutor(
-            krewhub_client=krewhub_client,
-            cookbook_id=cookbook,
-        )
-        card = build_orchestrator_card(host, port)
-        return "orchestrator", executor, card, "Orchestrator", ["orchestrate", "plan", "decompose", "coordinate"]
-
     raise click.UsageError(
-        "Specify one of: --agent, --provider, --framework, --endpoint, --planner, or --orchestrator"
+        "Specify one of: --agent, --provider, --framework, --endpoint, or --planner"
     )
 
 

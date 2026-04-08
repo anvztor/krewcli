@@ -25,52 +25,78 @@ CODEGEN_PROMPT = """\
 You are a workflow planner. Given a user request, generate Python code using \
 pydantic-graph's beta GraphBuilder API to decompose the request into executable steps.
 
-## API Reference
+The code you produce will be executed by krewhub's sandbox. The sandbox \
+injects a strict allowlist into the namespace — anything else (imports, \
+classes, try/except, lambdas, attribute access starting with `_`, eval, \
+open, getattr, etc.) will be rejected at validation time. Stick to the \
+template below verbatim.
+
+## Allowed names in the sandbox namespace
+GraphBuilder, StepContext, reduce_list_append, dispatch_cycle,
+OrchestratorState, OrchestratorDeps, plus the locals `g`, `graph`, `ctx`,
+plus standard literal types (str, int, list, dict, etc.) and basic
+builtins (len, range, isinstance, ...).
+
+## Required template
 
 ```python
-from pydantic_graph.beta import GraphBuilder, StepContext
-from pydantic_graph.beta.join import reduce_list_append
-
 g = GraphBuilder(
     state_type=OrchestratorState,
     deps_type=OrchestratorDeps,
     output_type=str,
 )
 
-# Define steps — each MUST call dispatch_and_wait(ctx, "step_name")
 @g.step
 async def step_name(ctx: StepContext[OrchestratorState, OrchestratorDeps, None]) -> str:
-    return await dispatch_and_wait(ctx, "step_name")
+    return await dispatch_cycle(
+        ctx,
+        node_id="step_name",
+        task_kind="coder",         # planner | coder | reviewer | tester
+        instruction="What this step should accomplish",
+        max_iterations=2,
+    )
 
-# Sequential edges
 g.add(
     g.edge_from(g.start_node).to(step_a),
     g.edge_from(step_a).to(step_b),
     g.edge_from(step_b).to(g.end_node),
 )
 
-# Parallel fork: broadcast sends same input to multiple steps
-# Then join collects results
-collect = g.join(reduce_list_append, initial_factory=list[str])
+graph = g.build()
+```
+
+For parallel branches, fan out and join back via additional g.edge_from(...) calls:
+
+```python
 g.add(
-    g.edge_from(step_a).broadcast().to(step_b, step_c),
-    g.edge_from(step_b).to(collect),
-    g.edge_from(step_c).to(collect),
-    g.edge_from(collect).to(step_d),
+    g.edge_from(step_a).to(step_b),
+    g.edge_from(step_a).to(step_c),
+    g.edge_from(step_b).to(step_d),
+    g.edge_from(step_c).to(step_d),
 )
 ```
 
 ## Rules
-1. ALWAYS define `graph = g.build()` as the last line
-2. Step names must be valid Python identifiers (snake_case)
-3. Every step function body is: `return await dispatch_and_wait(ctx, "step_name")`
-4. Use broadcast() for parallel work, join() to collect
-5. Output ONLY valid Python code — no markdown fences, no explanations
-6. Use 3-7 steps. Don't over-decompose.
-7. Common patterns:
-   - Feature: scope → implement + write_tests (parallel) → integrate → review
-   - Bugfix: diagnose → write_failing_test → fix → verify
-   - Refactor: analyze → plan → implement → update_tests → document
+1. ALWAYS define `graph = g.build()` as the last line.
+2. Step function names must be valid Python identifiers in snake_case and \
+   must match the `node_id=` argument inside the function body exactly.
+3. Every step body MUST be a single `return await dispatch_cycle(...)` call \
+   with keyword arguments. No other statements inside step bodies.
+4. `task_kind` must be one of: planner, coder, reviewer, tester. Pick the \
+   one whose role best fits the step.
+5. `instruction` is a short human-readable sentence telling the worker \
+   agent what this step should accomplish.
+6. `max_iterations` must be an integer between 1 and 5.
+7. Use 3-7 steps. Don't over-decompose.
+8. NEVER use: import, class, try/except, raise, with, lambda, global, \
+   eval, exec, open, getattr, setattr, type, super, or any name starting \
+   with an underscore. The sandbox will reject the code immediately.
+9. Output ONLY the Python code — no markdown fences, no explanations.
+
+## Common patterns
+- Feature: scope → implement → write_tests → review
+- Bugfix: diagnose → write_failing_test → fix → verify
+- Refactor: analyze → plan → implement → update_tests → document
 
 ## User Request
 {prompt}

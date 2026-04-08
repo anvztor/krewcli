@@ -290,6 +290,223 @@ class TestGatewayExecutorFailsWithoutPrompt:
         assert last_event.final is True
 
 
+class TestGatewayExecutorPlanningPath:
+    """When metadata has bundle_id but no task_id, the executor runs the
+    codegen prompt through the CLI and POSTs the result to krewhub via
+    attach_graph — no spawn, no callback, fully inline."""
+
+    def _make_krewhub_client(self) -> AsyncMock:
+        from krewcli.client.krewhub_client import KrewHubClient
+        client = AsyncMock(spec=KrewHubClient)
+        client.list_agents = AsyncMock(return_value=[
+            {"agent_id": "claude@host", "display_name": "Claude Agent",
+             "status": "online"},
+            {"agent_id": "codex@host", "display_name": "Codex Agent",
+             "status": "online"},
+        ])
+        client.attach_graph = AsyncMock(return_value={
+            "bundle": {"id": "bun_xyz"},
+            "tasks": [{"id": "t1", "graph_node_id": "step1"}],
+        })
+        return client
+
+    @pytest.mark.asyncio
+    async def test_planning_branch_runs_codegen_and_attaches(self):
+        mock_spawn = Mock(spec=SpawnManager)
+        mock_spawn.running_count_for = Mock(return_value=0)
+        mock_spawn.resolve_recipe_context = Mock(return_value={})
+        mock_spawn.run_codegen = AsyncMock(
+            return_value="g = GraphBuilder(...); graph = g.build()"
+        )
+        # spawn must NOT be called on the planning path
+        mock_spawn.spawn = AsyncMock()
+
+        hub = self._make_krewhub_client()
+        executor = GatewayExecutor(
+            agent_name="claude",
+            spawn_manager=mock_spawn,
+            agent_id="claude@host",
+            krewhub_client=hub,
+            cookbook_id="cb_test",
+        )
+
+        ctx = _make_request_context(
+            text="Add login flow",
+            metadata={
+                "bundle_id": "bun_xyz",
+                "cookbook_id": "cb_test",
+                "recipe_id": "r1",
+                "recipe_name": "auth",
+            },
+        )
+        eq = _make_event_queue()
+
+        await executor.execute(ctx, eq)
+
+        # Codegen ran via the synchronous spawn helper, not the normal
+        # fire-and-forget spawn path.
+        mock_spawn.run_codegen.assert_awaited_once()
+        call_kwargs = mock_spawn.run_codegen.call_args
+        assert call_kwargs.args[0] == "claude"
+        assert call_kwargs.args[1] == "Add login flow"
+        # agents_summary interpolated from list_agents result
+        assert "Claude Agent" in call_kwargs.args[2]
+        assert "Codex Agent" in call_kwargs.args[2]
+
+        mock_spawn.spawn.assert_not_called()
+
+        # Graph code POSTed to krewhub
+        hub.attach_graph.assert_awaited_once()
+        attach_args = hub.attach_graph.await_args
+        assert attach_args.args[0] == "bun_xyz"
+        assert "GraphBuilder" in attach_args.args[1]
+        assert attach_args.kwargs["created_by"] == "claude@host"
+
+        # Final status should be completed
+        final_events = [
+            c[0][0] for c in eq.enqueue_event.call_args_list
+            if getattr(c[0][0], "final", False)
+        ]
+        assert len(final_events) >= 1
+        assert final_events[-1].status.state == TaskState.completed
+
+    @pytest.mark.asyncio
+    async def test_task_id_metadata_still_takes_spawn_path(self):
+        """Regression: metadata with task_id continues to spawn the CLI
+        via the async callback-driven path, even if bundle_id is also set."""
+        mock_spawn = Mock(spec=SpawnManager)
+        mock_spawn.running_count_for = Mock(return_value=0)
+        mock_spawn.resolve_recipe_context = Mock(return_value={})
+        mock_spawn.spawn = AsyncMock(return_value=True)
+        mock_spawn.run_codegen = AsyncMock()
+
+        executor = GatewayExecutor(
+            agent_name="claude",
+            spawn_manager=mock_spawn,
+            agent_id="claude@host",
+            krewhub_client=self._make_krewhub_client(),
+            cookbook_id="cb_test",
+        )
+
+        ctx = _make_request_context(
+            text="Run the scope task",
+            metadata={
+                "task_id": "task_real",
+                "bundle_id": "bun_xyz",
+                "recipe_name": "auth",
+            },
+        )
+        eq = _make_event_queue()
+
+        await executor.execute(ctx, eq)
+
+        mock_spawn.spawn.assert_awaited_once()
+        mock_spawn.run_codegen.assert_not_called()
+
+        # The task_id from metadata (not context.task_id) must be forwarded
+        spawn_kwargs = mock_spawn.spawn.call_args.kwargs
+        assert spawn_kwargs["task_id"] == "task_real"
+
+    @pytest.mark.asyncio
+    async def test_planning_fails_when_krewhub_client_missing(self):
+        mock_spawn = Mock(spec=SpawnManager)
+        mock_spawn.running_count_for = Mock(return_value=0)
+        mock_spawn.resolve_recipe_context = Mock(return_value={})
+
+        executor = GatewayExecutor(
+            agent_name="claude",
+            spawn_manager=mock_spawn,
+            agent_id="claude@host",
+            krewhub_client=None,
+        )
+
+        ctx = _make_request_context(
+            text="plan this",
+            metadata={"bundle_id": "bun_xyz"},
+        )
+        eq = _make_event_queue()
+
+        await executor.execute(ctx, eq)
+
+        final_events = [
+            c[0][0] for c in eq.enqueue_event.call_args_list
+            if getattr(c[0][0], "final", False)
+        ]
+        assert final_events[-1].status.state == TaskState.failed
+        text = final_events[-1].status.message.parts[0].root.text
+        assert "krewhub_client" in text
+
+    @pytest.mark.asyncio
+    async def test_planning_fails_when_codegen_returns_none(self):
+        mock_spawn = Mock(spec=SpawnManager)
+        mock_spawn.running_count_for = Mock(return_value=0)
+        mock_spawn.resolve_recipe_context = Mock(return_value={})
+        mock_spawn.run_codegen = AsyncMock(return_value=None)
+
+        hub = self._make_krewhub_client()
+        executor = GatewayExecutor(
+            agent_name="claude",
+            spawn_manager=mock_spawn,
+            agent_id="claude@host",
+            krewhub_client=hub,
+        )
+
+        ctx = _make_request_context(
+            text="plan this",
+            metadata={"bundle_id": "bun_xyz"},
+        )
+        eq = _make_event_queue()
+
+        await executor.execute(ctx, eq)
+
+        hub.attach_graph.assert_not_called()
+        final_events = [
+            c[0][0] for c in eq.enqueue_event.call_args_list
+            if getattr(c[0][0], "final", False)
+        ]
+        assert final_events[-1].status.state == TaskState.failed
+
+    @pytest.mark.asyncio
+    async def test_planning_fails_when_attach_graph_raises(self):
+        import httpx
+
+        mock_spawn = Mock(spec=SpawnManager)
+        mock_spawn.running_count_for = Mock(return_value=0)
+        mock_spawn.resolve_recipe_context = Mock(return_value={})
+        mock_spawn.run_codegen = AsyncMock(
+            return_value="g = GraphBuilder(...); graph = g.build()"
+        )
+
+        hub = self._make_krewhub_client()
+        bad_response = Mock()
+        bad_response.status_code = 422
+        bad_response.text = "code rejected"
+        hub.attach_graph.side_effect = httpx.HTTPStatusError(
+            "bad", request=Mock(), response=bad_response,
+        )
+
+        executor = GatewayExecutor(
+            agent_name="claude",
+            spawn_manager=mock_spawn,
+            agent_id="claude@host",
+            krewhub_client=hub,
+        )
+
+        ctx = _make_request_context(
+            text="plan this",
+            metadata={"bundle_id": "bun_xyz"},
+        )
+        eq = _make_event_queue()
+
+        await executor.execute(ctx, eq)
+
+        final_events = [
+            c[0][0] for c in eq.enqueue_event.call_args_list
+            if getattr(c[0][0], "final", False)
+        ]
+        assert final_events[-1].status.state == TaskState.failed
+
+
 # ---------------------------------------------------------------------------
 # Gateway server tests
 # ---------------------------------------------------------------------------
@@ -312,6 +529,49 @@ class TestCreateGatewayAppWithExplicitAgents:
         route_paths = [r.path for r in app.routes]
         assert "/agents/claude" in route_paths
         assert "/health" in route_paths
+
+    def test_krewhub_client_is_threaded_to_executor(self):
+        """Planning requires the shared KrewHubClient to be injected into
+        every GatewayExecutor so workers can POST graph code back."""
+        from krewcli.client.krewhub_client import KrewHubClient
+
+        fake_client = Mock(spec=KrewHubClient)
+        with patch("krewcli.a2a.gateway_server.shutil.which", return_value="/usr/bin/claude"):
+            _app, _spawn, registered = create_gateway_app(
+                host="127.0.0.1",
+                port=9000,
+                working_dir="/tmp/test",
+                agent_names=["claude"],
+                krewhub_client=fake_client,
+                cookbook_id="cb_test",
+            )
+
+        assert registered == ["claude"]
+
+
+class TestWorkerAgentRegistryHasGenerateGraph:
+    """Every AGENT_REGISTRY worker advertises generate-graph so krewhub's
+    PlannerDispatchController can pick any of them for planning."""
+
+    def test_claude_has_generate_graph(self):
+        from krewcli.agents.registry import AGENT_REGISTRY
+        assert "generate-graph" in AGENT_REGISTRY["claude"]["capabilities"]
+
+    def test_codex_has_generate_graph(self):
+        from krewcli.agents.registry import AGENT_REGISTRY
+        assert "generate-graph" in AGENT_REGISTRY["codex"]["capabilities"]
+
+    def test_bub_has_generate_graph(self):
+        from krewcli.agents.registry import AGENT_REGISTRY
+        assert "generate-graph" in AGENT_REGISTRY["bub"]["capabilities"]
+
+    def test_gateway_metadata_helper_returns_capabilities_with_generate_graph(self):
+        from krewcli.cli import _gateway_agent_metadata
+
+        display_name, caps = _gateway_agent_metadata("claude")
+        assert display_name == "Claude Agent"
+        assert "generate-graph" in caps
+        assert "claim" in caps
 
 
 class TestGatewayAgentCardUrl:

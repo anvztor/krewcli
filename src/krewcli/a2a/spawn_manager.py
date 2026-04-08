@@ -298,6 +298,78 @@ class SpawnManager:
             session.task.cancel()
         return True
 
+    async def run_codegen(
+        self,
+        agent_name: str,
+        user_prompt: str,
+        agents_summary: str,
+        *,
+        working_dir: str = "",
+        repo_url: str = "",
+        branch: str = "main",
+    ) -> str | None:
+        """Run a CLI agent once with the graph-codegen prompt template.
+
+        Used by GatewayExecutor when a worker receives a planning request
+        (a message with ``bundle_id`` metadata but no ``task_id``). Unlike
+        the normal spawn path this is *synchronous-ish*: we await the
+        agent's run, capture its stdout from the returned TaskResult's
+        ``full_output``, strip markdown fences, and hand the code back
+        to the caller to POST to /bundles/{id}/graph.
+
+        No krewhub task is created. No callback is fired. The agent runs
+        in-process alongside the executor that received the request.
+
+        Args:
+            agent_name: Registry key ("claude", "codex", "bub", ...).
+            user_prompt: The original user prompt from the empty bundle.
+            agents_summary: Short human-readable list of agents available
+                in the cookbook, interpolated into the codegen template
+                so the LLM knows which task_kinds it can target.
+            working_dir/repo_url/branch: Per-recipe context, same as
+                the normal spawn path.
+
+        Returns:
+            The raw graph source code on success, or None on failure
+            (CLI crash, empty output, malformed fences).
+        """
+        from krewcli.workflows.llm_planner import CODEGEN_PROMPT, _clean_code
+
+        codegen_prompt = CODEGEN_PROMPT.format(
+            prompt=user_prompt, agents=agents_summary,
+        )
+        result = await self._execute(
+            agent_name, codegen_prompt,
+            working_dir=working_dir,
+            repo_url=repo_url,
+            branch=branch,
+            hook_env={},
+        )
+        if not result.success:
+            logger.warning(
+                "SpawnManager.run_codegen: %s failed: %s",
+                agent_name, result.blocked_reason or result.summary,
+            )
+            return None
+
+        raw_output = result.full_output or result.summary or ""
+        if not raw_output.strip():
+            logger.warning(
+                "SpawnManager.run_codegen: %s returned empty output",
+                agent_name,
+            )
+            return None
+
+        code = _clean_code(raw_output)
+        if "g.build()" not in code and "graph = " not in code:
+            logger.warning(
+                "SpawnManager.run_codegen: %s output does not look like "
+                "graph code (no g.build() or graph = assignment)",
+                agent_name,
+            )
+            return None
+        return code
+
     async def shutdown(self) -> None:
         """Cancel all running sessions."""
         for task_id in list(self._sessions):

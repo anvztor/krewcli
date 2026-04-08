@@ -11,6 +11,7 @@ No local LLM. No pydantic-ai Agent. The orchestrator is model-agnostic.
 from __future__ import annotations
 
 import logging
+import re
 
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.workflows.agent_dispatch import (
@@ -20,6 +21,11 @@ from krewcli.workflows.agent_dispatch import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches a fenced code block with optional language tag, capturing the
+# body. DOTALL so the body can span multiple lines. Non-greedy so a
+# response with multiple fences yields each block separately.
+_FENCE_RE = re.compile(r"```(?:[a-zA-Z0-9_+-]*)\s*\n(.*?)```", re.DOTALL)
 
 CODEGEN_PROMPT = """\
 You are a workflow planner. Given a user request, generate Python code using \
@@ -274,12 +280,49 @@ async def _generate_via_direct_a2a(
 
 
 def _clean_code(code: str) -> str:
-    """Strip markdown fences and whitespace from LLM output."""
+    """Extract graph source from LLM output, tolerating common wrappers.
+
+    LLMs routinely wrap code in markdown fences, prepend prose like
+    "Here's the workflow:", or reflexively add ``from __future__ import
+    annotations`` at the top. The krewhub sandbox validator rejects any
+    of those constructs (ImportFrom nodes, non-code leading text), so
+    this helper strips them before we POST the code to the attach-graph
+    endpoint.
+
+    Strategy:
+        1. If the response contains any ```-fenced blocks, pick the
+           first one whose body mentions ``g.build()`` or ``graph =``;
+           otherwise take the first block. This handles the "here's
+           your code:\\n```python...```\\nhope that helps!" shape.
+        2. If no fenced blocks exist, treat the whole response as code.
+        3. Strip ``from __future__ import ...`` lines — common LLM
+           reflex that the sandbox's ImportFrom check rejects.
+        4. Trim surrounding whitespace.
+
+    Pure function; no side effects.
+    """
+    if not code:
+        return ""
+
+    # 1. Prefer fenced block content when fences are present.
+    fenced_blocks = _FENCE_RE.findall(code)
+    if fenced_blocks:
+        preferred = next(
+            (b for b in fenced_blocks if "g.build" in b or "graph = " in b or "graph=" in b),
+            fenced_blocks[0],
+        )
+        code = preferred
+
     code = code.strip()
-    if code.startswith("```python"):
-        code = code[len("```python"):]
-    elif code.startswith("```"):
-        code = code[3:]
-    if code.endswith("```"):
-        code = code[:-3]
+
+    # 2. Strip any `from __future__ import ...` lines — the sandbox
+    #    rejects every ImportFrom node but LLMs reflexively prepend
+    #    `from __future__ import annotations`.
+    code = re.sub(
+        r"^\s*from\s+__future__\s+import\s+[^\n]+\n",
+        "",
+        code,
+        flags=re.MULTILINE,
+    )
+
     return code.strip()

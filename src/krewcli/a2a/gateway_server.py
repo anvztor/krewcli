@@ -9,11 +9,21 @@ own AgentCard, executor, and capacity tracking.
     /agents/codex/.well-known/agent.json    → Codex agent card
     /agents/codex                           → A2A JSON-RPC
     /health                                 → gateway health
+
+Every worker advertises the `generate-graph` capability so krewhub's
+PlannerDispatchController can route empty-bundle planning requests to
+any of them. When a worker receives a planning request (identified by
+``metadata.bundle_id`` without ``metadata.task_id``), its GatewayExecutor
+runs the CLI with the codegen prompt template, captures the output, and
+POSTs the resulting graph code to /api/v1/bundles/{id}/graph directly.
+No separate planner process, no standalone agent — every worker is a
+planner by default.
 """
 
 from __future__ import annotations
 
 import shutil
+from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -27,6 +37,9 @@ from a2a.server.tasks import InMemoryTaskStore
 from krewcli.a2a.executors.gateway import GatewayExecutor, build_gateway_agent_card
 from krewcli.a2a.spawn_manager import SpawnManager
 from krewcli.agents.registry import AGENT_REGISTRY
+
+if TYPE_CHECKING:
+    from krewcli.client.krewhub_client import KrewHubClient
 
 
 def create_gateway_app(
@@ -42,11 +55,26 @@ def create_gateway_app(
     recipe_contexts: dict[str, dict] | None = None,
     krewhub_url: str = "",
     workspace_dir: str = "",
+    *,
+    krewhub_client: "KrewHubClient | None" = None,
+    cookbook_id: str = "",
 ) -> tuple[Starlette, SpawnManager, list[str]]:
     """Create a multi-agent gateway Starlette app.
 
-    Auto-detects available CLIs on PATH if agent_names is None.
-    Returns (app, spawn_manager, registered_agent_names).
+    Auto-detects available CLIs on PATH if agent_names is None. Each
+    worker's GatewayExecutor receives the shared ``krewhub_client`` so
+    it can POST graph code to /bundles/{id}/graph when a planning
+    request arrives (see GatewayExecutor.execute for the routing).
+
+    Args:
+        krewhub_client: Shared KrewHubClient used by planning requests
+            to attach graph code back to the originating bundle. Can be
+            None in test contexts where no planning is exercised.
+        cookbook_id: Default cookbook id for agent discovery during
+            planning — passed through to GatewayExecutor.
+
+    Returns:
+        (app, spawn_manager, registered_agent_names).
     """
     # Detect available agents
     if agent_names is None:
@@ -80,6 +108,8 @@ def create_gateway_app(
             spawn_manager=spawn_manager,
             agent_id=agent_id,
             max_concurrent=max_concurrent,
+            krewhub_client=krewhub_client,
+            cookbook_id=cookbook_id,
         )
 
         handler = DefaultRequestHandler(
@@ -112,4 +142,4 @@ def create_gateway_app(
 
     app = Starlette(routes=mounts)
 
-    return app, spawn_manager, agent_names
+    return app, spawn_manager, list(agent_names)

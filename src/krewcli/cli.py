@@ -253,6 +253,21 @@ async def _run_agent(settings, recipe_id, cookbook_id, agent_id, display_name, c
             pass
 
 
+def _gateway_agent_metadata(name: str) -> tuple[str, list[str]]:
+    """Return (display_name, capabilities) for a gateway-mounted agent.
+
+    Every worker in AGENT_REGISTRY also advertises ``generate-graph`` so
+    krewhub's PlannerDispatchController can route planning requests to
+    any of them — there's no separate planner agent, each worker's
+    GatewayExecutor handles both task execution and planning inline.
+    """
+    entry = AGENT_REGISTRY.get(name, {})
+    return (
+        entry.get("display_name", name),
+        list(entry.get("capabilities", [])),
+    )
+
+
 async def _run_gateway(
     settings, recipe_id, cookbook_id, agent_id_prefix, working_dir,
     agent_names, max_concurrent,
@@ -280,11 +295,13 @@ async def _run_gateway(
         max_concurrent=max_concurrent,
         krewhub_url=settings.krewhub_url,
         workspace_dir=working_dir,
+        krewhub_client=client,
+        cookbook_id=cookbook_id,
     )
 
     _click.echo(f"  Agents: {', '.join(registered_agents)}")
     for name in registered_agents:
-        _click.echo(f"    /agents/{name} -> {name} CLI")
+        _click.echo(f"    /agents/{name}")
 
     # Register each agent type separately in krewhub
     heartbeats: list[HeartbeatLoop] = []
@@ -292,9 +309,7 @@ async def _run_gateway(
         agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
         endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
 
-        entry = AGENT_REGISTRY.get(name, {})
-        display_name = entry.get("display_name", name)
-        capabilities = entry.get("capabilities", [])
+        display_name, capabilities = _gateway_agent_metadata(name)
 
         try:
             await client.register_agent(
@@ -614,7 +629,7 @@ async def _run_onboard(
             else:
                 click.echo(f"  ⚠ {name}: {wiring.notes or 'no wiring'}")
 
-        # 9b. Create gateway app
+        # 9b. Create gateway app (also mounts /agents/planner by default)
         app, spawn_manager, registered_agents = create_gateway_app(
             host=settings.agent_host,
             port=settings.agent_port,
@@ -628,21 +643,21 @@ async def _run_onboard(
             recipe_contexts=recipe_contexts,
             krewhub_url=settings.krewhub_url,
             workspace_dir=working_dir,
+            krewhub_client=client,
+            cookbook_id=cookbook_id,
         )
 
         click.echo(f"\nGateway agents: {', '.join(registered_agents)}")
         for name in registered_agents:
-            click.echo(f"  /agents/{name} -> {name} CLI")
+            click.echo(f"  /agents/{name}")
 
-        # 10. Register agents and start heartbeats
+        # 10. Register agents and start heartbeats (workers + planner)
         heartbeats: list[HeartbeatLoop] = []
         for name in registered_agents:
             agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
             endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
 
-            entry = AGENT_REGISTRY.get(name, {})
-            display_name = entry.get("display_name", name)
-            capabilities = entry.get("capabilities", [])
+            display_name, capabilities = _gateway_agent_metadata(name)
 
             try:
                 await client.register_agent(

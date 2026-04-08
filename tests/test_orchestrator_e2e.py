@@ -173,6 +173,14 @@ def _build_fake_agent_app(krewhub_base_url: str, api_key: str) -> Starlette:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason=(
+        "Legacy monolithic OrchestratorExecutor flow. The replacement is "
+        "test_planner_flow_e2e.py, which exercises the krewhub-driven "
+        "PlannerDispatchController + GraphRunnerController loop. This test "
+        "is kept for reference until the legacy executor is deleted."
+    )
+)
 @pytest.mark.asyncio
 async def test_orchestrator_e2e_bundle_cooked(tmp_path):
     """Full e2e: register agent → prompt → orchestrate → dispatch → cooked."""

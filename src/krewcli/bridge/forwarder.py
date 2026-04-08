@@ -72,6 +72,21 @@ def _build_body(event: CanonicalHookEvent) -> str:
         return f"{name.lower()} session={sid}"
     if name == "UserPromptSubmit":
         return (event.prompt or "")[:200]
+    if name == "Notification":
+        # Codex (and other sources) emit assistant prose and reasoning
+        # as Notification events. Prefer the actual message text so the
+        # event card shows something meaningful instead of "Notification".
+        msg = (event.last_assistant_message or "").strip()
+        if msg:
+            return msg
+        summary = ""
+        extra = event.extra or {}
+        if isinstance(extra, dict):
+            raw_summary = extra.get("summary")
+            if isinstance(raw_summary, str):
+                summary = raw_summary.strip()
+        if summary:
+            return summary
     return name
 
 

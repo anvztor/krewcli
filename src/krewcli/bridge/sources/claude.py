@@ -20,6 +20,23 @@ def normalize(hook_event_name: str, payload: dict) -> CanonicalHookEvent:
     if not isinstance(tool_input, dict):
         tool_input = {"raw": tool_input}
 
+    extra: dict = {"_raw_tool_name": payload.get("tool_name", "")}
+
+    # Claude's PostToolUse hook includes the tool result under
+    # `tool_response`. Mirror codex's `_output_preview` so the
+    # workspace event feed can render output regardless of source.
+    tool_response = payload.get("tool_response")
+    if tool_response is not None:
+        if isinstance(tool_response, str):
+            preview = tool_response
+        else:
+            try:
+                import json as _json
+                preview = _json.dumps(tool_response, ensure_ascii=False)
+            except (TypeError, ValueError):
+                preview = str(tool_response)
+        extra["_output_preview"] = preview[:400]
+
     return CanonicalHookEvent(
         hook_event_name=hook_event_name,
         source="claude",
@@ -32,5 +49,5 @@ def normalize(hook_event_name: str, payload: dict) -> CanonicalHookEvent:
         env=collect_env(),
         ppid=payload.get("_ppid") or None,
         tty=detect_tty(),
-        extra={"_raw_tool_name": payload.get("tool_name", "")},
+        extra=extra,
     )

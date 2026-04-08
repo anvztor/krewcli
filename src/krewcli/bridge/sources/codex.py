@@ -51,5 +51,11 @@ def normalize(hook_event_name: str, payload: dict) -> CanonicalHookEvent:
             "codex_permission_mode": payload.get("codex_permission_mode"),
             "codex_session_start_source": payload.get("codex_session_start_source"),
             "codex_turn_id": payload.get("codex_turn_id"),
+            # Pass through `_codex_call_id` when the upstream payload
+            # already carries it. Rollout-watcher sourced events fill
+            # this in unconditionally; the normalizer doesn't, so any
+            # tooling that POSTs synthetic codex hook events directly
+            # must include it for server-side dedup to work.
+            "_codex_call_id": payload.get("_codex_call_id"),
         },
     )

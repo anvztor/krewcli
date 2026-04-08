@@ -82,6 +82,14 @@ g.add(
 )
 ```
 
+Krewhub enforces fanin at runtime: when multiple edges converge on a
+step (like `step_d` above), krewhub records those upstream steps as
+dependencies on the task row and holds dispatch until every upstream
+task reaches DONE. You do NOT need to add explicit Join nodes; just
+declare the edges and krewhub honors them. Any upstream that ends in a
+non-DONE terminal state (blocked/cancelled) causes the downstream step
+to fail fast with `error: upstream failure: ...`.
+
 ## Rules
 1. ALWAYS define `graph = g.build()` as the last line.
 2. Step function names must be valid Python identifiers in snake_case and \

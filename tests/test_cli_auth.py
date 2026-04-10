@@ -1,9 +1,10 @@
-"""Tests for CLI register and login commands."""
+"""Tests for CLI wallet and SIWE login commands."""
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -15,99 +16,102 @@ def runner():
     return CliRunner()
 
 
-class TestRegisterCommand:
-    def test_register_success(self, runner, tmp_path):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 201
-        mock_resp.json.return_value = {"email": "u@b.com", "id": "user_1", "is_active": True, "roles": []}
-
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = mock_resp
-        mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
-
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client_instance):
-            result = runner.invoke(main, ["register"], input="u@b.com\npassword1\npassword1\n")
+class TestWalletCommands:
+    def test_wallet_create(self, runner, tmp_path):
+        with patch("krewcli.auth.wallet._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["wallet", "create"])
 
         assert result.exit_code == 0
-        assert "Registered as u@b.com" in result.output
+        assert "Wallet created: 0x" in result.output
+        assert (tmp_path / "wallet").is_file()
 
-    def test_register_server_error(self, runner):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 409
-        mock_resp.json.return_value = {"error": "Email already registered"}
+    def test_wallet_import_valid(self, runner, tmp_path):
+        # A valid private key (32 bytes hex)
+        key = "0x" + "ab" * 32
 
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = mock_resp
-        mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
+        with patch("krewcli.auth.wallet._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["wallet", "import", key])
 
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client_instance):
-            result = runner.invoke(main, ["register"], input="u@b.com\npassword1\npassword1\n")
+        assert result.exit_code == 0
+        assert "Wallet imported: 0x" in result.output
+
+    def test_wallet_import_invalid(self, runner):
+        result = runner.invoke(main, ["wallet", "import", "not-a-key"])
+        assert result.exit_code == 1
+        assert "Invalid" in result.output
+
+    def test_wallet_address(self, runner, tmp_path):
+        # Create a wallet first
+        with patch("krewcli.auth.wallet._DEFAULT_DIR", tmp_path):
+            runner.invoke(main, ["wallet", "create"])
+            result = runner.invoke(main, ["wallet", "address"])
+
+        assert result.exit_code == 0
+        assert result.output.strip().startswith("0x")
+
+    def test_wallet_address_missing(self, runner, tmp_path):
+        with patch("krewcli.auth.wallet._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["wallet", "address"])
 
         assert result.exit_code == 1
-        assert "Email already registered" in result.output
-
-    def test_register_connection_error(self, runner):
-        import httpx
-
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.side_effect = httpx.ConnectError("refused")
-        mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
-
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client_instance):
-            result = runner.invoke(main, ["register"], input="u@b.com\npassword1\npassword1\n")
-
-        assert result.exit_code == 1
-        assert "Could not connect" in result.output
+        assert "No wallet found" in result.output
 
 
 class TestLoginCommand:
-    def test_login_success(self, runner, tmp_path):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"access_token": "jwt-tok", "token_type": "bearer"}
+    def test_login_device_flow_approved(self, runner, tmp_path):
+        """Device flow: request code → poll → approved → JWT saved."""
+        from unittest.mock import MagicMock
 
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = mock_resp
-        mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
 
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client_instance), \
-             patch("krewcli.cli.save_token") as mock_save:
-            result = runner.invoke(main, ["login"], input="u@b.com\npassword1\n")
+        # First call: POST /device/request
+        request_resp = MagicMock()
+        request_resp.status_code = 200
+        request_resp.raise_for_status = MagicMock()
+        request_resp.json.return_value = {
+            "device_code": "dc_test",
+            "user_code": "ABCD-1234",
+            "expires_in": 600,
+        }
+
+        # Second call: POST /device/token → approved immediately
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.raise_for_status = MagicMock()
+        token_resp.json.return_value = {
+            "status": "approved",
+            "token": "jwt-test-token",
+            "account_id": "acc_test123456",
+            "wallet_address": "0xABC123",
+            "session_id": "ses_test",
+            "expires_at": "2026-04-10T00:00:00Z",
+        }
+
+        mock_client.post.side_effect = [request_resp, token_resp]
+
+        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
+             patch("time.sleep"), \
+             patch("webbrowser.open"), \
+             patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["login"])
 
         assert result.exit_code == 0
-        assert "Logged in" in result.output
-        mock_save.assert_called_once_with("jwt-tok")
-
-    def test_login_bad_credentials(self, runner):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.json.return_value = {"error": "Invalid credentials"}
-
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = mock_resp
-        mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
-
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client_instance):
-            result = runner.invoke(main, ["login"], input="u@b.com\nwrong\n")
-
-        assert result.exit_code == 1
-        assert "Invalid credentials" in result.output
+        assert "Logged in as acc_test123456" in result.output
+        assert (tmp_path / "token").read_text().strip() == "jwt-test-token"
 
     def test_login_connection_error(self, runner):
-        import httpx
+        from unittest.mock import MagicMock
 
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.side_effect = httpx.ConnectError("refused")
-        mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = httpx.ConnectError("refused")
 
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client_instance):
-            result = runner.invoke(main, ["login"], input="u@b.com\npassword1\n")
+        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
+             patch("webbrowser.open"):
+            result = runner.invoke(main, ["login"])
 
         assert result.exit_code == 1
-        assert "Could not connect" in result.output
+        assert "Could not connect" in result.output or "krewauth" in result.output

@@ -6,12 +6,33 @@ import httpx
 
 
 class KrewHubClient:
-    """Async HTTP client for KrewHub API."""
+    """Async HTTP client for KrewHub API.
 
-    def __init__(self, base_url: str, api_key: str) -> None:
+    Auth priority:
+      1. Bearer JWT (from SIWE login, stored in ~/.krewcli/token)
+      2. X-API-Key (legacy, from config)
+
+    Set acting_as_agent_id to include X-Acting-As header for agent-mode ops.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        jwt_token: str | None = None,
+        acting_as_agent_id: int | None = None,
+    ) -> None:
+        headers: dict[str, str] = {}
+        if jwt_token:
+            headers["Authorization"] = f"Bearer {jwt_token}"
+        else:
+            headers["X-API-Key"] = api_key
+        if acting_as_agent_id is not None:
+            headers["X-Acting-As"] = f"agent:{acting_as_agent_id}"
+
         self._client = httpx.AsyncClient(
             base_url=base_url,
-            headers={"X-API-Key": api_key},
+            headers=headers,
             timeout=30.0,
         )
 

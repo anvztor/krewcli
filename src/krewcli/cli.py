@@ -10,7 +10,6 @@ import httpx
 import uvicorn
 
 from krewcli.agents.registry import AGENT_REGISTRY, get_agent_info
-from krewcli.auth.token_store import save_token
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.config import get_settings
 from krewcli.presence.heartbeat import HeartbeatLoop
@@ -30,7 +29,16 @@ def main(ctx: click.Context) -> None:
     ctx.ensure_object(dict)
     settings = get_settings()
     ctx.obj["settings"] = settings
-    ctx.obj["client"] = KrewHubClient(settings.krewhub_url, settings.api_key)
+
+    # Load JWT from ~/.krewcli/token if available (from 'krewcli login')
+    from krewcli.auth.token_store import load_token
+    jwt_token = load_token()
+
+    ctx.obj["client"] = KrewHubClient(
+        settings.krewhub_url,
+        settings.api_key,
+        jwt_token=jwt_token,
+    )
 
 
 # ── join: the universal agent onboarding command ──
@@ -242,7 +250,8 @@ async def _run_gateway(
 
     from krewcli.a2a.gateway_server import create_gateway_app
 
-    client = KrewHubClient(settings.krewhub_url, settings.api_key)
+    from krewcli.auth.token_store import load_token as _lt
+    client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_lt())
     callback_url = f"{settings.krewhub_url}/api/v1/a2a/callback"
 
     repo_url, branch = await _load_recipe_context(client, recipe_id)
@@ -264,7 +273,60 @@ async def _run_gateway(
     for name in registered_agents:
         _click.echo(f"    /agents/{name} -> {name} CLI")
 
-    # Register each agent type separately in krewhub
+    # --- ERC-4337: session key + smart account ---
+    from krewcli.auth.token_store import load_token as _load_token
+    from krewcli.session_key import load_session_key, get_session_key_address
+
+    _jwt = _load_token()
+    erc8004_ids: dict[str, int] = {}
+    session_addr = get_session_key_address()
+
+    if _jwt and session_addr:
+        auth_url = settings.krew_auth_url
+
+        # Get smart account info
+        try:
+            acct_resp = await asyncio.to_thread(
+                lambda: httpx.get(f"{auth_url}/auth/account/info", params={"token": _jwt}, timeout=10).json()
+            )
+            smart_addr = acct_resp.get("smart_address")
+            _click.echo(f"\n  Smart Account: {smart_addr}")
+            _click.echo(f"  Session Key: {session_addr}")
+
+            if smart_addr:
+                # Request session key approval for each agent
+                for name in registered_agents:
+                    display_name, capabilities = _gateway_agent_metadata(name)
+                    try:
+                        req_resp = await asyncio.to_thread(lambda n=name, dn=display_name: httpx.post(
+                            f"{auth_url}/auth/session-keys/request",
+                            json={
+                                "token": _jwt,
+                                "agent_name": n,
+                                "session_pubkey": session_addr,
+                                "allowed_targets": [settings.erc8004_identity_registry],
+                                "allowed_selectors": ["0xf2c298be"],  # register(string)
+                                "spend_limit": "0",
+                                "valid_hours": 24,
+                            },
+                            timeout=10,
+                        ).json())
+                        _click.echo(f"  Session key requested for {dn}: {req_resp.get('status', 'unknown')}")
+                    except Exception as e:
+                        _click.echo(f"  Session key request failed for {name}: {e}")
+
+                _click.echo(f"\n  Approve session keys in cookrew to enable on-chain operations.")
+                _click.echo(f"  Off-chain operations (task claims, events) work immediately via JWT.")
+            else:
+                _click.echo(f"  No smart account — connect wallet in cookrew first")
+        except Exception as e:
+            _click.echo(f"\n  Account lookup failed: {e}")
+    elif _jwt:
+        _click.echo("\n  No session key — run 'krewcli session-key create' first")
+    else:
+        _click.echo("\n  No session — run 'krewcli login' first")
+
+    # Register each agent type in krewhub
     heartbeats: list[HeartbeatLoop] = []
     for name in registered_agents:
         agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
@@ -283,7 +345,8 @@ async def _run_gateway(
                 max_concurrent_tasks=max_concurrent,
                 endpoint_url=endpoint_url,
             )
-            _click.echo(f"  Registered {display_name} ({agent_id})")
+            erc_tag = f" (ERC-8004 #{erc8004_ids[name]})" if name in erc8004_ids else ""
+            _click.echo(f"  Registered {display_name} ({agent_id}){erc_tag}")
         except Exception:
             logging.getLogger(__name__).warning(
                 "Registration failed for %s, continuing with heartbeat", name
@@ -473,7 +536,8 @@ async def _run_onboard(
     )
     from krewcli.interactive import prompt_multi_select, prompt_single_select
 
-    client = KrewHubClient(settings.krewhub_url, settings.api_key)
+    from krewcli.auth.token_store import load_token as _lt
+    client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_lt())
     callback_url = f"{settings.krewhub_url}/api/v1/a2a/callback"
 
     try:
@@ -757,63 +821,150 @@ async def _load_recipe_context(client, recipe_id):
 # ── Auth commands ──
 
 
-@main.command("register")
-@click.option("--url", default=None, help="Auth server URL (default: http://{agent_host}:{agent_port})")
-@click.pass_context
-def register(ctx, url):
-    """Register a new user account."""
-    settings = ctx.obj["settings"]
-    base_url = url or f"http://{settings.agent_host}:{settings.agent_port}"
+@main.group("wallet")
+def wallet_group():
+    """Manage wallet identity for SIWE authentication."""
+    pass
 
-    email = click.prompt("Email")
-    password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
+
+@wallet_group.command("create")
+def wallet_create():
+    """Generate a new Ethereum wallet and save to ~/.krewcli/wallet."""
+    from krewcli.auth.wallet import generate_wallet
+
+    address, key_hex = generate_wallet()
+    click.echo(f"Wallet created: {address}")
+    click.echo(f"Private key saved to ~/.krewcli/wallet")
+    click.echo(f"Back up this key! If lost, you lose access to this identity.")
+
+
+@wallet_group.command("import")
+@click.argument("private_key")
+def wallet_import(private_key):
+    """Import an existing private key. Usage: krewcli wallet import 0x..."""
+    from eth_account import Account
+    from krewcli.auth.wallet import save_private_key
 
     try:
-        with httpx.Client(timeout=10) as http:
-            resp = http.post(
-                f"{base_url}/auth/register",
-                json={"email": email, "password": password},
-            )
-    except httpx.ConnectError:
-        click.echo(f"Error: Could not connect to server at {base_url}. Is 'krewcli join' running?", err=True)
+        acct = Account.from_key(private_key)
+    except Exception:
+        click.echo("Error: Invalid private key.", err=True)
         raise SystemExit(1)
 
-    if resp.status_code == 201:
-        click.echo(f"Registered as {email}")
-    else:
-        error = resp.json().get("error", "Registration failed")
-        click.echo(f"Error: {error}", err=True)
+    save_private_key(private_key)
+    click.echo(f"Wallet imported: {acct.address}")
+    click.echo(f"Saved to ~/.krewcli/wallet")
+
+
+@wallet_group.command("address")
+def wallet_address():
+    """Show the current wallet address."""
+    from krewcli.auth.wallet import get_wallet_address
+
+    addr = get_wallet_address()
+    if addr is None:
+        click.echo("No wallet found. Run 'krewcli wallet create' first.", err=True)
         raise SystemExit(1)
+    click.echo(addr)
+
+
+@main.group("session-key")
+def session_key_group():
+    """Manage session keys for ERC-4337 smart account operations."""
+    pass
+
+
+@session_key_group.command("create")
+def session_key_create():
+    """Generate a new session key for agent operations."""
+    from krewcli.session_key import generate_session_key
+
+    address, _ = generate_session_key()
+    click.echo(f"Session key created: {address}")
+    click.echo("Saved to ~/.krewcli/session_key")
+    click.echo("Request approval: human must call addSessionKey() on the smart account")
+
+
+@session_key_group.command("address")
+def session_key_address():
+    """Show the current session key address."""
+    from krewcli.session_key import get_session_key_address
+
+    addr = get_session_key_address()
+    if addr is None:
+        click.echo("No session key. Run 'krewcli session-key create'.", err=True)
+        raise SystemExit(1)
+    click.echo(addr)
 
 
 @main.command("login")
-@click.option("--url", default=None, help="Auth server URL (default: http://{agent_host}:{agent_port})")
 @click.pass_context
-def login(ctx, url):
-    """Authenticate and save an access token."""
-    settings = ctx.obj["settings"]
-    base_url = url or f"http://{settings.agent_host}:{settings.agent_port}"
+def login(ctx):
+    """Log in via krewauth device authorization (approve in browser).
 
-    email = click.prompt("Email")
-    password = click.prompt("Password", hide_input=True)
+    Opens the krewauth login page. Authenticate with passkey or wallet.
+    No private key needed on this machine.
+    """
+    import time
+    from krewcli.auth.token_store import save_token
+
+    settings = ctx.obj["settings"]
+    auth_url = settings.krew_auth_url
 
     try:
         with httpx.Client(timeout=10) as http:
-            resp = http.post(
-                f"{base_url}/auth/login",
-                json={"email": email, "password": password},
-            )
-    except httpx.ConnectError:
-        click.echo(f"Error: Could not connect to server at {base_url}. Is 'krewcli join' running?", err=True)
-        raise SystemExit(1)
+            # 1. Request a device code from krewauth
+            resp = http.post(f"{auth_url}/auth/device/request")
+            resp.raise_for_status()
+            data = resp.json()
+            device_code = data["device_code"]
+            user_code = data["user_code"]
+            # Always use the client-side auth URL (not server's self-reported URL)
+            verification_uri = f"{auth_url}/auth/login?device_code={user_code}"
+            expires_in = data["expires_in"]
 
-    if resp.status_code == 200:
-        data = resp.json()
-        save_token(data["access_token"])
-        click.echo("Logged in. Token saved.")
-    else:
-        error = resp.json().get("error", "Login failed")
-        click.echo(f"Error: {error}", err=True)
+            click.echo()
+            click.echo(f"  Open: {verification_uri}")
+            click.echo(f"  Code: {user_code}")
+            click.echo()
+            click.echo(f"  Waiting for approval (expires in {expires_in // 60} min)...")
+
+            # Try to open browser automatically
+            import webbrowser
+            webbrowser.open(verification_uri)
+
+            # 2. Poll until approved
+            poll_interval = 3
+            elapsed = 0
+            while elapsed < expires_in:
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+                resp = http.post(
+                    f"{auth_url}/auth/device/token",
+                    json={"device_code": device_code},
+                )
+                if resp.status_code == 404:
+                    click.echo("Error: Code expired.", err=True)
+                    raise SystemExit(1)
+
+                resp.raise_for_status()
+                result = resp.json()
+
+                if result["status"] == "approved":
+                    save_token(result["token"])
+                    click.echo(f"\n  Logged in as {result.get('account_id', 'unknown')}")
+                    if result.get("wallet_address"):
+                        click.echo(f"  Wallet: {result['wallet_address']}")
+                    click.echo(f"  Session expires: {result['expires_at']}")
+                    click.echo(f"  JWT saved to ~/.krewcli/token")
+                    return
+
+            click.echo("Error: Timed out waiting for approval.", err=True)
+            raise SystemExit(1)
+
+    except httpx.ConnectError:
+        click.echo(f"Error: Could not connect to krewauth at {auth_url}", err=True)
         raise SystemExit(1)
 
 

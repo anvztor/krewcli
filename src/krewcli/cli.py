@@ -364,7 +364,88 @@ async def _run_gateway(
         hb.start()
         heartbeats.append(hb)
 
-    _click.echo(f"\nGateway ready. Waiting for tasks from krewhub.")
+    # Start SSE watcher for A2A invocations from hub gateway
+    from krewcli.sse_watcher import SSEWatcher
+
+    owner = "anvztor"  # TODO: derive from JWT account
+    try:
+        import jwt as _pyjwt
+        _jwt_payload = _pyjwt.decode(_lt(), options={"verify_signature": False})
+        owner = _jwt_payload.get("sub", owner).replace("acc_", "")
+    except Exception:
+        pass
+
+    # Get cookbook owner for A2A path
+    try:
+        cb_detail = await client.get_cookbook(cookbook_id)
+        owner = cb_detail.get("cookbook", {}).get("owner_id", owner)
+    except Exception:
+        pass
+
+    async def _handle_a2a_invocation(payload: dict) -> dict | None:
+        """Bridge: krewhub A2A invocation → local agent executor → real result."""
+        agent_name = payload.get("agent_name", "")
+        message = payload.get("message", "")
+        params = payload.get("params", {})
+
+        # Extract text from A2A message parts
+        msg_obj = params.get("message", {})
+        parts = msg_obj.get("parts", [])
+        text = "\n".join(p.get("text", "") for p in parts if "text" in p) or message
+
+        if not text:
+            text = message or json.dumps(params)
+
+        _click.echo(f"  A2A invocation: {agent_name} ← {text[:80]}")
+
+        # Check agent is available
+        if agent_name not in registered_agents:
+            return {"text": f"Agent '{agent_name}' not registered on this gateway"}
+
+        # Run the actual agent CLI via SpawnManager._execute()
+        try:
+            spawn_result = await spawn_manager._execute(
+                agent_name=agent_name,
+                prompt=text,
+                working_dir=working_dir,
+                repo_url=repo_url,
+                branch=branch,
+            )
+
+            if spawn_result.success:
+                _click.echo(f"  A2A result: {agent_name} → {spawn_result.summary[:80]}")
+                return {
+                    "text": spawn_result.summary or spawn_result.full_output,
+                    "success": True,
+                    "files_modified": spawn_result.files_modified,
+                    "code_refs": spawn_result.code_refs,
+                }
+            else:
+                _click.echo(f"  A2A failed: {agent_name} → {spawn_result.blocked_reason or spawn_result.summary}")
+                return {
+                    "text": spawn_result.blocked_reason or spawn_result.summary or "Agent failed",
+                    "success": False,
+                }
+
+        except Exception as e:
+            _click.echo(f"  A2A error: {agent_name} → {e}")
+            return {"text": f"Error: {e}", "success": False}
+
+    sse_watcher = SSEWatcher(
+        krewhub_url=settings.krewhub_url,
+        jwt_token=_lt() or "",
+        owner=owner,
+        agent_names=[n for n in registered_agents],
+        on_invocation=_handle_a2a_invocation,
+    )
+    sse_watcher.start()
+
+    # Also poll pending invocations on startup (catch any missed while offline)
+    await sse_watcher.poll_pending()
+
+    _click.echo(f"\nGateway ready.")
+    _click.echo(f"  A2A: hub.cookrew.dev/a2a/{owner}/*")
+    _click.echo(f"  Listening for tasks + A2A invocations via SSE...")
 
     config = uvicorn.Config(
         app, host=settings.agent_host, port=settings.agent_port, log_level="info"

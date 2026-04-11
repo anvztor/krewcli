@@ -37,6 +37,7 @@ class SSEWatcher:
         self._on_invocation = on_invocation
         self._running = False
         self._task: asyncio.Task | None = None
+        self._last_seq = 0  # track last seen seq for reconnect
 
     def start(self) -> None:
         self._running = True
@@ -66,7 +67,9 @@ class SSEWatcher:
 
     async def _watch_once(self) -> None:
         """Single SSE connection session."""
-        url = f"{self._krewhub_url}/api/v1/watch?resource_type=a2a_invocation"
+        # Subscribe to ALL events, filter client-side for a2a_invocation
+        # Pass since=latest to skip replay of old events
+        url = f"{self._krewhub_url}/api/v1/watch?since={self._last_seq}"
         headers = {"Authorization": f"Bearer {self._jwt_token}"}
 
         async with httpx.AsyncClient(timeout=None) as client:
@@ -92,7 +95,18 @@ class SSEWatcher:
                     except json.JSONDecodeError:
                         continue
 
-                    await self._handle_event(event)
+                    # Track sequence for reconnect
+                    seq = event.get("seq", 0)
+                    if seq > self._last_seq:
+                        self._last_seq = seq
+
+                    # Filter for a2a_invocation events only
+                    if event.get("resource_type") != "a2a_invocation":
+                        continue
+
+                    # The watch event wraps payload in "object" field
+                    payload = event.get("object", event)
+                    await self._handle_event(payload)
 
     async def _handle_event(self, event: dict) -> None:
         """Process a watch event."""

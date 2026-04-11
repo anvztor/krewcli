@@ -45,8 +45,8 @@ def main(ctx: click.Context) -> None:
 
 
 @main.command()
-@click.option("--recipe", required=True, help="Recipe ID to join")
-@click.option("--cookbook", default=None, help="Cookbook ID (required for agent registration)")
+@click.option("--recipe", default=None, help="Recipe ID to join (interactive if omitted)")
+@click.option("--cookbook", default=None, help="Cookbook ID (interactive if omitted)")
 @click.option("--port", default=9999, type=int, help="A2A server port")
 @click.option("--agent-id", default=None, help="Override agent ID prefix")
 @click.option("--workdir", default=".", help="Working directory for agent")
@@ -117,10 +117,67 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
     # Gateway mode — multi-agent
     agent_names = agents.split(",") if agents else None
     resolved_cookbook = cookbook or settings.default_cookbook_id
+
+    # Interactive mode: if no --recipe or --cookbook, prompt the human
+    if not recipe or not resolved_cookbook:
+        import shutil
+        from krewcli.interactive import prompt_multi_select, prompt_single_select
+        from krewcli.auth.token_store import load_token as _load_tok
+        _tok = _load_tok()
+        if not _tok:
+            raise click.UsageError("No session. Run 'krewcli login' first.")
+
+        _client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_tok)
+
+        async def _fetch_cookbooks():
+            cbs = await _client.list_cookbooks()
+            await _client.close()
+            return cbs
+
+        async def _fetch_cookbook_detail(cb_id):
+            detail = await _client.get_cookbook(cb_id)
+            await _client.close()
+            return detail
+
+        click.echo("Fetching cookbooks...")
+        cookbooks = asyncio.run(_fetch_cookbooks())
+        if not cookbooks:
+            raise click.UsageError("No cookbooks found. Create one in cookrew first.")
+
+        cb_items = [(cb["name"], cb["id"]) for cb in cookbooks]
+        cb_idx = prompt_single_select("Cookbooks", cb_items)
+        selected_cb = cookbooks[cb_idx]
+        resolved_cookbook = selected_cb["id"]
+
+        # Refetch client for next call
+        _client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_tok)
+        cb_detail = asyncio.run(_fetch_cookbook_detail(resolved_cookbook))
+        recipes_list = cb_detail.get("recipes", [])
+        if not recipes_list:
+            raise click.UsageError(f"No recipes in cookbook '{selected_cb['name']}'.")
+
+        rec_items = [(r["name"], r["id"]) for r in recipes_list]
+        rec_indices = prompt_multi_select("Recipes (select which to work on)", rec_items)
+        selected_recipes = [recipes_list[i] for i in rec_indices]
+        recipe = selected_recipes[0]["id"]
+
+        # Detect agents on PATH
+        available_agents = [name for name in AGENT_REGISTRY if shutil.which(name)]
+        if not available_agents:
+            raise click.UsageError("No agent CLIs found on PATH (claude, codex, etc).")
+
+        agent_items = [(f"{name} ✓", name) for name in available_agents]
+        agent_indices = prompt_multi_select("Agents (detected on PATH)", agent_items)
+        selected_agent_names = [available_agents[i] for i in agent_indices]
+        if selected_agent_names:
+            agent_names = selected_agent_names
+
     if not resolved_cookbook:
         raise click.UsageError("Specify --cookbook or set KREWCLI_DEFAULT_COOKBOOK_ID")
+    if not recipe:
+        raise click.UsageError("Specify --recipe or use interactive mode")
 
-    click.echo("Starting A2A gateway")
+    click.echo("\nStarting A2A gateway")
     click.echo(f"  Recipe: {recipe}")
     click.echo(f"  Cookbook: {resolved_cookbook}")
     click.echo(f"  Work dir: {resolved_workdir}")

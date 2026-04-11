@@ -319,40 +319,41 @@ async def _run_gateway(
                 _click.echo(f"  Off-chain operations (task claims, events) work immediately via JWT.")
 
                 # Build mint UserOps (signed with session key, ready for human to submit)
-                sk_private = load_session_key()
-                if sk_private and smart_addr:
-                    try:
-                        from krewcli.mint_agents import build_mint_userops
-                        agents_to_mint = [
-                            {"name": n, "display_name": _gateway_agent_metadata(n)[0],
-                             "capabilities": _gateway_agent_metadata(n)[1]}
-                            for n in registered_agents
-                        ]
-                        mint_ops = build_mint_userops(
-                            agents=agents_to_mint,
-                            smart_account=smart_addr,
-                            session_key_private=sk_private,
-                            owner=owner,
+                # Build one-click mint UserOps (deploy + session key + register in one tx)
+                try:
+                    from krewcli.mint_agents import build_one_click_userop
+                    mint_ops = []
+                    for name in registered_agents:
+                        display_name, capabilities = _gateway_agent_metadata(name)
+                        op = await asyncio.to_thread(lambda n=name, dn=display_name: build_one_click_userop(
+                            agent_name=n,
+                            display_name=dn,
+                            owner_address=acct_resp.get("owner_address", ""),
+                            session_key_addr=session_addr,
                             identity_registry=settings.erc8004_identity_registry,
+                            factory_address=settings.erc8004_identity_registry,  # will be overridden
+                            entrypoint_address="0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
                             rpc_url=settings.erc8004_rpc_url,
-                            entrypoint_address=settings.entrypoint_v06 if hasattr(settings, 'entrypoint_v06') else "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
                             hub_base_url=settings.krewhub_url,
-                        )
+                            owner_name=owner,
+                        ))
+                        mint_ops.append(op)
 
-                        # Submit to krewauth for human approval
-                        mint_resp = await asyncio.to_thread(lambda: httpx.post(
-                            f"{auth_url}/auth/mint-ops/submit",
-                            json={"token": _jwt, "ops": [
-                                {"agent_name": op["agent_name"], "display_name": op["display_name"],
-                                 "agent_uri": op["agent_uri"], "userop": op["userop"]}
-                                for op in mint_ops
-                            ]},
-                            timeout=10,
-                        ).json())
-                        _click.echo(f"  Mint UserOps submitted: {mint_resp.get('detail', 'unknown')}")
-                        _click.echo(f"  Approve in cookrew to mint ERC-8004 agent NFTs on-chain.")
-                    except Exception as e:
-                        _click.echo(f"  Mint UserOp build skipped: {e}")
+                    # Submit to krewauth for human approval
+                    mint_resp = await asyncio.to_thread(lambda: httpx.post(
+                        f"{auth_url}/auth/mint-ops/submit",
+                        json={"token": _jwt, "ops": [
+                            {"agent_name": op["agent_name"], "display_name": op["display_name"],
+                             "agent_uri": op["agent_uri"], "smart_account": op["smart_account"],
+                             "userop": op["userop"]}
+                            for op in mint_ops
+                        ]},
+                        timeout=30,
+                    ).json())
+                    _click.echo(f"  {mint_resp.get('detail', 'Mint ops submitted')}")
+                    _click.echo(f"  Open cookrew → click [Mint] next to each agent")
+                except Exception as e:
+                    _click.echo(f"  Mint setup skipped: {e}")
             else:
                 _click.echo(f"  No smart account — connect wallet in cookrew first")
         except Exception as e:

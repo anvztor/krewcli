@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -16,6 +17,25 @@ from krewcli.presence.heartbeat import HeartbeatLoop
 from krewcli.repo_diagram import build_repo_diagram
 from krewcli.workflow.digest_builder import DigestBuilder
 from krewcli.workflow.task_runner import TaskRunner
+
+
+def _get_owner_label() -> str:
+    """Extract a stable owner label from the JWT (username > account_id)."""
+    try:
+        from krewcli.auth.token_store import load_token
+        token = load_token()
+        if not token:
+            return "local"
+        import jwt as _pyjwt
+        payload = _pyjwt.decode(token, options={"verify_signature": False})
+        return payload.get("username") or payload.get("sub", "local")
+    except Exception:
+        return "local"
+
+
+def _make_agent_id(name: str, owner: str) -> str:
+    """Stable agent_id: name@owner (not port-dependent)."""
+    return f"{name}@{owner}"
 
 
 @click.group()
@@ -422,8 +442,9 @@ async def _run_gateway(
 
     # Register each agent type in krewhub
     heartbeats: list[HeartbeatLoop] = []
+    _owner_label = _get_owner_label()
     for name in registered_agents:
-        agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
+        agent_id = _make_agent_id(name, _owner_label)
         endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
 
         entry = AGENT_REGISTRY.get(name, {})
@@ -461,20 +482,7 @@ async def _run_gateway(
     # Start SSE watcher for A2A invocations from hub gateway
     from krewcli.sse_watcher import SSEWatcher
 
-    owner = "anvztor"  # TODO: derive from JWT account
-    try:
-        import jwt as _pyjwt
-        _jwt_payload = _pyjwt.decode(_lt(), options={"verify_signature": False})
-        owner = _jwt_payload.get("sub", owner).replace("acc_", "")
-    except Exception:
-        pass
-
-    # Get cookbook owner for A2A path
-    try:
-        cb_detail = await client.get_cookbook(cookbook_id)
-        owner = cb_detail.get("cookbook", {}).get("owner_id", owner)
-    except Exception:
-        pass
+    owner = _owner_label
 
     async def _handle_a2a_invocation(payload: dict) -> dict | None:
         """Bridge: krewhub A2A invocation → local agent executor → real result."""
@@ -486,6 +494,7 @@ async def _run_gateway(
         msg_obj = params.get("message", {})
         parts = msg_obj.get("parts", [])
         text = "\n".join(p.get("text", "") for p in parts if "text" in p) or message
+        metadata = msg_obj.get("metadata", {})
 
         if not text:
             text = message or json.dumps(params)
@@ -496,8 +505,77 @@ async def _run_gateway(
         if agent_name not in registered_agents:
             return {"text": f"Agent '{agent_name}' not registered on this gateway"}
 
-        # Run the actual agent CLI via SpawnManager._execute()
+        # Planner task: has bundle_id but NO task_id (graph generation request)
+        # Regular tasks from GraphRunner have BOTH bundle_id and task_id
+        bundle_id = metadata.get("bundle_id")
+        task_id_from_meta = metadata.get("task_id")
+        if bundle_id and not task_id_from_meta:
+            _click.echo(f"  Planner task: generating graph for bundle {bundle_id}")
+            try:
+                import re
+                from krewcli.workflows.llm_planner import CODEGEN_PROMPT
+
+                # Build the codegen prompt
+                agents_list = await client.list_agents(cookbook_id)
+                agent_summary = ", ".join(
+                    a.get("display_name", a.get("agent_id", "?")) for a in agents_list
+                )
+                codegen_prompt = CODEGEN_PROMPT.format(prompt=text, agents=agent_summary)
+
+                # Run codegen through local agent
+                _click.echo(f"  Running {agent_name} for graph codegen...")
+                spawn_result = await spawn_manager._execute(
+                    agent_name=agent_name,
+                    prompt=codegen_prompt,
+                    working_dir=working_dir,
+                    repo_url=repo_url,
+                    branch=branch,
+                )
+
+                if not spawn_result.success:
+                    return {"text": f"Graph codegen failed: {spawn_result.blocked_reason or spawn_result.summary}", "success": False}
+
+                # Extract graph code from agent output
+                output = spawn_result.full_output or spawn_result.summary or ""
+                fence_re = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
+                matches = fence_re.findall(output)
+                code = None
+                for m in matches:
+                    if "g.build()" in m or "graph = " in m:
+                        code = m.strip()
+                        break
+                if not code and ("g.build()" in output or "graph = " in output):
+                    # No fences, try raw output
+                    code = output.strip()
+
+                if not code:
+                    return {"text": "Agent output did not contain valid graph code", "success": False}
+
+                _click.echo(f"  Attaching graph ({len(code)} bytes) to bundle {bundle_id}")
+                result = await client.attach_graph(bundle_id, code, created_by="orchestrator")
+                task_count = len(result.get("tasks", []))
+                _click.echo(f"  Graph attached: {task_count} tasks created")
+                return {
+                    "text": f"Graph attached: {task_count} tasks created",
+                    "success": True,
+                    "bundle_id": bundle_id,
+                    "task_count": task_count,
+                }
+            except Exception as e:
+                _click.echo(f"  Planner error: {e}")
+                return {"text": f"Graph generation failed: {e}", "success": False}
+
+        # Regular task: run agent CLI and update krewhub task status
+        task_id = metadata.get("task_id")
+        recipe_id = metadata.get("recipe_id", "")
         try:
+            # Mark task as working
+            if task_id:
+                try:
+                    await client.update_task_status(task_id, "working")
+                except Exception:
+                    pass
+
             spawn_result = await spawn_manager._execute(
                 agent_name=agent_name,
                 prompt=text,
@@ -508,6 +586,24 @@ async def _run_gateway(
 
             if spawn_result.success:
                 _click.echo(f"  A2A result: {agent_name} → {spawn_result.summary[:80]}")
+                # Mark task done in krewhub
+                if task_id:
+                    try:
+                        await client.update_task_status(task_id, "done")
+                        # Post completion event
+                        await client.post_recipe_event(
+                            recipe_id=recipe_id,
+                            event_type="milestone",
+                            actor_id=agent_name,
+                            body=spawn_result.summary or "Task completed",
+                            payload={
+                                "task_id": task_id,
+                                "files_modified": spawn_result.files_modified,
+                                "code_refs": spawn_result.code_refs,
+                            },
+                        )
+                    except Exception as e:
+                        _click.echo(f"  Warning: failed to update task status: {e}")
                 return {
                     "text": spawn_result.summary or spawn_result.full_output,
                     "success": True,
@@ -515,14 +611,22 @@ async def _run_gateway(
                     "code_refs": spawn_result.code_refs,
                 }
             else:
-                _click.echo(f"  A2A failed: {agent_name} → {spawn_result.blocked_reason or spawn_result.summary}")
-                return {
-                    "text": spawn_result.blocked_reason or spawn_result.summary or "Agent failed",
-                    "success": False,
-                }
+                reason = spawn_result.blocked_reason or spawn_result.summary or "Agent failed"
+                _click.echo(f"  A2A failed: {agent_name} → {reason}")
+                if task_id:
+                    try:
+                        await client.update_task_status(task_id, "blocked", blocked_reason=reason)
+                    except Exception:
+                        pass
+                return {"text": reason, "success": False}
 
         except Exception as e:
             _click.echo(f"  A2A error: {agent_name} → {e}")
+            if task_id:
+                try:
+                    await client.update_task_status(task_id, "blocked", blocked_reason=str(e))
+                except Exception:
+                    pass
             return {"text": f"Error: {e}", "success": False}
 
     sse_watcher = SSEWatcher(
@@ -839,8 +943,9 @@ async def _run_onboard(
 
         # 10. Register agents and start heartbeats
         heartbeats: list[HeartbeatLoop] = []
+        _owner_label = _get_owner_label()
         for name in registered_agents:
-            agent_id = f"{name}@{settings.agent_host}:{settings.agent_port}"
+            agent_id = _make_agent_id(name, _owner_label)
             endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
 
             entry = AGENT_REGISTRY.get(name, {})
@@ -1128,7 +1233,10 @@ def login(ctx):
 
                 if result["status"] == "approved":
                     save_token(result["token"])
-                    click.echo(f"\n  Logged in as {result.get('account_id', 'unknown')}")
+                    # Show username from JWT
+                    _label = _get_owner_label()
+                    click.echo(f"\n  Logged in as @{_label}")
+                    click.echo(f"  Account: {result.get('account_id', 'unknown')}")
                     if result.get("wallet_address"):
                         click.echo(f"  Wallet: {result['wallet_address']}")
                     click.echo(f"  Session expires: {result['expires_at']}")

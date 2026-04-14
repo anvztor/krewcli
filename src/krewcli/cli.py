@@ -13,6 +13,12 @@ import uvicorn
 from krewcli.agents.registry import AGENT_REGISTRY, get_agent_info
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.config import get_settings
+from krewcli.gateway import (
+    run_gateway as _run_gateway_impl,
+    load_recipe_context,
+    build_auth_service as _build_auth_service,
+    _gateway_agent_metadata,
+)
 from krewcli.presence.heartbeat import HeartbeatLoop
 from krewcli.repo_diagram import build_repo_diagram
 from krewcli.workflow.digest_builder import DigestBuilder
@@ -38,7 +44,43 @@ def _make_agent_id(name: str, owner: str) -> str:
     return f"{name}@{owner}"
 
 
-@click.group()
+class _KrewCLI(click.Group):
+    """Click group with friendly error handling."""
+
+    def invoke(self, ctx: click.Context) -> None:
+        try:
+            super().invoke(ctx)
+        except click.exceptions.Exit:
+            raise
+        except click.UsageError:
+            raise
+        except httpx.ConnectError as exc:
+            _msg = str(exc)
+            if "CERTIFICATE_VERIFY_FAILED" in _msg:
+                raise click.ClickException(
+                    f"SSL certificate error connecting to KrewHub.\n"
+                    f"  Set KREWCLI_VERIFY_SSL=false to skip verification.\n"
+                    f"  Detail: {_msg.splitlines()[-1] if _msg else exc}"
+                ) from None
+            raise click.ClickException(
+                f"Cannot connect to KrewHub: {_msg}"
+            ) from None
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 401:
+                raise click.ClickException(
+                    "Authentication failed (401). Run 'krewcli login' to refresh your session."
+                ) from None
+            raise click.ClickException(
+                f"KrewHub returned {status}: {exc.response.text[:200]}"
+            ) from None
+        except httpx.RequestError as exc:
+            raise click.ClickException(
+                f"Network error: {exc}"
+            ) from None
+
+
+@click.group(cls=_KrewCLI)
 @click.pass_context
 def main(ctx: click.Context) -> None:
     """KrewCLI — bring your agents online on Cookrew."""
@@ -58,6 +100,7 @@ def main(ctx: click.Context) -> None:
         settings.krewhub_url,
         settings.api_key,
         jwt_token=jwt_token,
+        verify_ssl=settings.verify_ssl,
     )
 
 
@@ -147,7 +190,7 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
         if not _tok:
             raise click.UsageError("No session. Run 'krewcli login' first.")
 
-        _client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_tok)
+        _client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_tok, verify_ssl=settings.verify_ssl)
 
         async def _fetch_cookbooks():
             cbs = await _client.list_cookbooks()
@@ -170,7 +213,7 @@ def join(ctx, recipe, cookbook, port, agent_id, workdir, agents, max_concurrent,
         resolved_cookbook = selected_cb["id"]
 
         # Refetch client for next call
-        _client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_tok)
+        _client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_tok, verify_ssl=settings.verify_ssl)
         cb_detail = asyncio.run(_fetch_cookbook_detail(resolved_cookbook))
         recipes_list = cb_detail.get("recipes", [])
         if not recipes_list:
@@ -246,7 +289,7 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, hos
 
     if orchestrator:
         from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor, build_orchestrator_card
-        krewhub_client = KrewHubClient(settings.krewhub_url, settings.api_key)
+        krewhub_client = KrewHubClient(settings.krewhub_url, settings.api_key, verify_ssl=settings.verify_ssl)
         cookbook = settings.default_cookbook_id
         executor = OrchestratorExecutor(
             krewhub_client=krewhub_client,
@@ -264,7 +307,7 @@ def _default_model(provider):
 
 async def _run_agent(settings, recipe_id, cookbook_id, agent_id, display_name, capabilities, executor, card, working_dir, mode, agent_name=None):
     from krewcli.a2a.server import create_a2a_app
-    client = KrewHubClient(settings.krewhub_url, settings.api_key)
+    client = KrewHubClient(settings.krewhub_url, settings.api_key, verify_ssl=settings.verify_ssl)
 
     endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}"
 
@@ -321,380 +364,10 @@ async def _run_gateway(
     settings, recipe_id, cookbook_id, agent_id_prefix, working_dir,
     agent_names, max_concurrent,
 ):
-    """Run the multi-agent A2A gateway."""
-    import shutil
-    import click as _click
-
-    from krewcli.a2a.gateway_server import create_gateway_app
-
-    from krewcli.auth.token_store import load_token as _lt
-    client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_lt())
-    callback_url = f"{settings.krewhub_url}/api/v1/a2a/callback"
-
-    repo_url, branch = await _load_recipe_context(client, recipe_id)
-
-    app, spawn_manager, registered_agents = create_gateway_app(
-        host=settings.agent_host,
-        port=settings.agent_port,
-        working_dir=working_dir,
-        repo_url=repo_url,
-        branch=branch,
-        callback_url=callback_url,
-        api_key=settings.api_key,
-        agent_names=agent_names,
-        max_concurrent=max_concurrent,
-        krewhub_client=client,
-    )
-
-    _click.echo(f"  Agents: {', '.join(registered_agents)}")
-    for name in registered_agents:
-        _click.echo(f"    /agents/{name} -> {name} CLI")
-
-    # --- ERC-4337: session key + smart account ---
-    from krewcli.auth.token_store import load_token as _load_token
-    from krewcli.session_key import load_session_key, get_session_key_address
-
-    _jwt = _load_token()
-    erc8004_ids: dict[str, int] = {}
-    session_addr = get_session_key_address()
-
-    if _jwt and session_addr:
-        auth_url = settings.krew_auth_url
-
-        # Get smart account info
-        try:
-            acct_resp = await asyncio.to_thread(
-                lambda: httpx.get(f"{auth_url}/auth/account/info", params={"token": _jwt}, timeout=10).json()
-            )
-            smart_addr = acct_resp.get("smart_address")
-            _click.echo(f"\n  Smart Account: {smart_addr}")
-            _click.echo(f"  Session Key: {session_addr}")
-
-            if smart_addr:
-                # Request session key approval for each agent
-                for name in registered_agents:
-                    display_name, capabilities = _gateway_agent_metadata(name)
-                    try:
-                        req_resp = await asyncio.to_thread(lambda n=name, dn=display_name: httpx.post(
-                            f"{auth_url}/auth/session-keys/request",
-                            json={
-                                "token": _jwt,
-                                "agent_name": n,
-                                "session_pubkey": session_addr,
-                                "allowed_targets": [settings.erc8004_identity_registry],
-                                "allowed_selectors": ["0xf2c298be"],  # register(string)
-                                "spend_limit": "0",
-                                "valid_hours": 24,
-                            },
-                            timeout=10,
-                        ).json())
-                        _click.echo(f"  Session key requested for {dn}: {req_resp.get('status', 'unknown')}")
-                    except Exception as e:
-                        _click.echo(f"  Session key request failed for {name}: {e}")
-
-                _click.echo(f"\n  Approve session keys in cookrew to enable on-chain operations.")
-                _click.echo(f"  Off-chain operations (task claims, events) work immediately via JWT.")
-
-                # Build mint UserOps (signed with session key, ready for human to submit)
-                # Build one-click mint UserOps (deploy + session key + register in one tx)
-                try:
-                    from krewcli.mint_agents import build_one_click_userop
-                    mint_ops = []
-                    for name in registered_agents:
-                        display_name, capabilities = _gateway_agent_metadata(name)
-                        op = await asyncio.to_thread(lambda n=name, dn=display_name: build_one_click_userop(
-                            agent_name=n,
-                            display_name=dn,
-                            owner_address=acct_resp.get("owner_address", ""),
-                            session_key_addr=session_addr,
-                            identity_registry=settings.erc8004_identity_registry,
-                            factory_address=settings.erc8004_identity_registry,  # will be overridden
-                            entrypoint_address="0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
-                            rpc_url=settings.erc8004_rpc_url,
-                            hub_base_url=settings.krewhub_url,
-                            owner_name=owner,
-                        ))
-                        mint_ops.append(op)
-
-                    # Submit to krewauth for human approval
-                    mint_resp = await asyncio.to_thread(lambda: httpx.post(
-                        f"{auth_url}/auth/mint-ops/submit",
-                        json={"token": _jwt, "ops": [
-                            {"agent_name": op["agent_name"], "display_name": op["display_name"],
-                             "agent_uri": op["agent_uri"], "smart_account": op["smart_account"],
-                             "userop": op["userop"]}
-                            for op in mint_ops
-                        ]},
-                        timeout=30,
-                    ).json())
-                    _click.echo(f"  {mint_resp.get('detail', 'Mint ops submitted')}")
-                    _click.echo(f"  Open cookrew → click [Mint] next to each agent")
-                except Exception as e:
-                    _click.echo(f"  Mint setup skipped: {e}")
-            else:
-                _click.echo(f"  No smart account — connect wallet in cookrew first")
-        except Exception as e:
-            _click.echo(f"\n  Account lookup failed: {e}")
-    elif _jwt:
-        _click.echo("\n  No session key — run 'krewcli session-key create' first")
-    else:
-        _click.echo("\n  No session — run 'krewcli login' first")
-
-    # Register each agent type in krewhub
-    heartbeats: list[HeartbeatLoop] = []
-    _owner_label = _get_owner_label()
-    for name in registered_agents:
-        agent_id = _make_agent_id(name, _owner_label)
-        endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
-
-        entry = AGENT_REGISTRY.get(name, {})
-        display_name = entry.get("display_name", name)
-        capabilities = entry.get("capabilities", [])
-
-        try:
-            await client.register_agent(
-                agent_id=agent_id,
-                cookbook_id=cookbook_id,
-                display_name=display_name,
-                capabilities=capabilities,
-                max_concurrent_tasks=max_concurrent,
-                endpoint_url=endpoint_url,
-            )
-            erc_tag = f" (ERC-8004 #{erc8004_ids[name]})" if name in erc8004_ids else ""
-            _click.echo(f"  Registered {display_name} ({agent_id}){erc_tag}")
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "Registration failed for %s, continuing with heartbeat", name
-            )
-
-        hb = HeartbeatLoop(
-            client=client,
-            agent_id=agent_id,
-            cookbook_id=cookbook_id,
-            display_name=display_name,
-            capabilities=capabilities,
-            interval=settings.heartbeat_interval,
-            endpoint_url=endpoint_url,
-        )
-        hb.start()
-        heartbeats.append(hb)
-
-    # Start SSE watcher for A2A invocations from hub gateway
-    from krewcli.sse_watcher import SSEWatcher
-
-    owner = _owner_label
-
-    async def _handle_a2a_invocation(payload: dict) -> dict | None:
-        """Bridge: krewhub A2A invocation → local agent executor → real result."""
-        agent_name = payload.get("agent_name", "")
-        message = payload.get("message", "")
-        params = payload.get("params", {})
-
-        # Extract text from A2A message parts
-        msg_obj = params.get("message", {})
-        parts = msg_obj.get("parts", [])
-        text = "\n".join(p.get("text", "") for p in parts if "text" in p) or message
-        metadata = msg_obj.get("metadata", {})
-
-        if not text:
-            text = message or json.dumps(params)
-
-        _click.echo(f"  A2A invocation: {agent_name} ← {text[:80]}")
-
-        # Check agent is available
-        if agent_name not in registered_agents:
-            return {"text": f"Agent '{agent_name}' not registered on this gateway"}
-
-        # Planner task: has bundle_id but NO task_id (graph generation request)
-        # Regular tasks from GraphRunner have BOTH bundle_id and task_id
-        bundle_id = metadata.get("bundle_id")
-        task_id_from_meta = metadata.get("task_id")
-        if bundle_id and not task_id_from_meta:
-            _click.echo(f"  Planner task: generating graph for bundle {bundle_id}")
-            try:
-                import re
-                from krewcli.workflows.llm_planner import CODEGEN_PROMPT
-
-                # Build the codegen prompt
-                agents_list = await client.list_agents(cookbook_id)
-                agent_summary = ", ".join(
-                    a.get("display_name", a.get("agent_id", "?")) for a in agents_list
-                )
-                codegen_prompt = CODEGEN_PROMPT.format(prompt=text, agents=agent_summary)
-
-                # Run codegen through local agent
-                _click.echo(f"  Running {agent_name} for graph codegen...")
-                spawn_result = await spawn_manager._execute(
-                    agent_name=agent_name,
-                    prompt=codegen_prompt,
-                    working_dir=working_dir,
-                    repo_url=repo_url,
-                    branch=branch,
-                )
-
-                if not spawn_result.success:
-                    return {"text": f"Graph codegen failed: {spawn_result.blocked_reason or spawn_result.summary}", "success": False}
-
-                # Extract graph code from agent output
-                output = spawn_result.full_output or spawn_result.summary or ""
-                fence_re = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
-                matches = fence_re.findall(output)
-                code = None
-                for m in matches:
-                    if "g.build()" in m or "graph = " in m:
-                        code = m.strip()
-                        break
-                if not code and ("g.build()" in output or "graph = " in output):
-                    # No fences, try raw output
-                    code = output.strip()
-
-                if not code:
-                    return {"text": "Agent output did not contain valid graph code", "success": False}
-
-                _click.echo(f"  Attaching graph ({len(code)} bytes) to bundle {bundle_id}")
-                result = await client.attach_graph(bundle_id, code, created_by="orchestrator")
-                task_count = len(result.get("tasks", []))
-                _click.echo(f"  Graph attached: {task_count} tasks created")
-                return {
-                    "text": f"Graph attached: {task_count} tasks created",
-                    "success": True,
-                    "bundle_id": bundle_id,
-                    "task_count": task_count,
-                }
-            except Exception as e:
-                _click.echo(f"  Planner error: {e}")
-                return {"text": f"Graph generation failed: {e}", "success": False}
-
-        # Regular task: run agent CLI and update krewhub task status
-        task_id = metadata.get("task_id")
-        recipe_id = metadata.get("recipe_id", "")
-        try:
-            # Mark task as working
-            if task_id:
-                try:
-                    await client.update_task_status(task_id, "working")
-                except Exception:
-                    pass
-
-            spawn_result = await spawn_manager._execute(
-                agent_name=agent_name,
-                prompt=text,
-                working_dir=working_dir,
-                repo_url=repo_url,
-                branch=branch,
-            )
-
-            if spawn_result.success:
-                _click.echo(f"  A2A result: {agent_name} → {spawn_result.summary[:80]}")
-                # Mark task done in krewhub
-                if task_id:
-                    try:
-                        await client.update_task_status(task_id, "done")
-                        # Post completion event
-                        await client.post_recipe_event(
-                            recipe_id=recipe_id,
-                            event_type="milestone",
-                            actor_id=agent_name,
-                            body=spawn_result.summary or "Task completed",
-                            payload={
-                                "task_id": task_id,
-                                "files_modified": spawn_result.files_modified,
-                                "code_refs": spawn_result.code_refs,
-                            },
-                        )
-                    except Exception as e:
-                        _click.echo(f"  Warning: failed to update task status: {e}")
-                return {
-                    "text": spawn_result.summary or spawn_result.full_output,
-                    "success": True,
-                    "files_modified": spawn_result.files_modified,
-                    "code_refs": spawn_result.code_refs,
-                }
-            else:
-                reason = spawn_result.blocked_reason or spawn_result.summary or "Agent failed"
-                _click.echo(f"  A2A failed: {agent_name} → {reason}")
-                if task_id:
-                    try:
-                        await client.update_task_status(task_id, "blocked", blocked_reason=reason)
-                    except Exception:
-                        pass
-                return {"text": reason, "success": False}
-
-        except Exception as e:
-            _click.echo(f"  A2A error: {agent_name} → {e}")
-            if task_id:
-                try:
-                    await client.update_task_status(task_id, "blocked", blocked_reason=str(e))
-                except Exception:
-                    pass
-            return {"text": f"Error: {e}", "success": False}
-
-    sse_watcher = SSEWatcher(
-        krewhub_url=settings.krewhub_url,
-        jwt_token=_lt() or "",
-        owner=owner,
-        agent_names=[n for n in registered_agents],
-        on_invocation=_handle_a2a_invocation,
-    )
-    sse_watcher.start()
-
-    # Also poll pending invocations on startup (catch any missed while offline)
-    await sse_watcher.poll_pending()
-
-    _click.echo(f"\nGateway ready.")
-    _click.echo(f"  A2A: hub.cookrew.dev/a2a/{owner}/*")
-    _click.echo(f"  Listening for tasks + A2A invocations via SSE...")
-
-    config = uvicorn.Config(
-        app, host=settings.agent_host, port=settings.agent_port, log_level="info"
-    )
-    server = uvicorn.Server(config)
-
-    loop = asyncio.get_running_loop()
-    _orig_handler = loop.get_exception_handler()
-
-    def _shutdown_exception_handler(loop, context):
-        exc = context.get("exception")
-        if isinstance(exc, (asyncio.InvalidStateError, OSError, BrokenPipeError)):
-            return
-        if _orig_handler:
-            _orig_handler(loop, context)
-        else:
-            loop.default_exception_handler(context)
-
-    try:
-        await server.serve()
-    finally:
-        loop.set_exception_handler(_shutdown_exception_handler)
-        await spawn_manager.shutdown()
-        for hb in heartbeats:
-            try:
-                await hb.stop()
-            except (asyncio.CancelledError, asyncio.InvalidStateError, OSError):
-                pass
-        try:
-            await client.close()
-        except (asyncio.CancelledError, asyncio.InvalidStateError, OSError):
-            pass
-
-
-def _build_auth_service(settings):
-    """Build auth service if JWT secret is configured."""
-    if not settings.jwt_secret:
-        logging.getLogger(__name__).warning(
-            "KREWCLI_JWT_SECRET is not set — auth is DISABLED"
-        )
-        return None
-    if len(settings.jwt_secret) < 32:
-        logging.getLogger(__name__).warning(
-            "KREWCLI_JWT_SECRET is set but shorter than 32 chars — auth disabled"
-        )
-        return None
-    from krewcli.auth.service import AuthService
-    logging.getLogger(__name__).info("Auth enabled (JWT middleware active)")
-    return AuthService(
-        jwt_secret=settings.jwt_secret,
-        token_expiry_minutes=settings.token_expiry_minutes,
+    """Delegate to gateway module."""
+    await _run_gateway_impl(
+        settings, recipe_id, cookbook_id, agent_id_prefix, working_dir,
+        agent_names, max_concurrent,
     )
 
 
@@ -816,7 +489,7 @@ async def _run_onboard(
     from krewcli.interactive import prompt_multi_select, prompt_single_select
 
     from krewcli.auth.token_store import load_token as _lt
-    client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_lt())
+    client = KrewHubClient(settings.krewhub_url, settings.api_key, jwt_token=_lt(), verify_ssl=settings.verify_ssl)
     callback_url = f"{settings.krewhub_url}/api/v1/a2a/callback"
 
     try:
@@ -1093,9 +766,7 @@ async def _run_task_worker_once(client, runner, heartbeat, recipe_id, agent_id, 
 
 
 async def _load_recipe_context(client, recipe_id):
-    detail = await client.get_recipe(recipe_id)
-    r = detail.get("recipe", {})
-    return r.get("repo_url", ""), r.get("default_branch", "main")
+    return await load_recipe_context(client, recipe_id)
 
 
 # ── Auth commands ──

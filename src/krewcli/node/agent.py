@@ -8,7 +8,7 @@ from krewcli.agents.registry import get_agent_info
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.presence.heartbeat import HeartbeatLoop
 from krewcli.storage.tape_client import TapeStorageClient
-from krewcli.watch.client import WatchClient, WatchEvent
+from krewwatch import WatchClient, WatchEvent
 from krewcli.workflow.digest_builder import DigestBuilder
 from krewcli.workflow.task_runner import TaskRunner
 

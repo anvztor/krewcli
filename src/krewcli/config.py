@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     token_expiry_minutes: int = 30
     hook_listener_port: int = 9998
+    verify_ssl: bool = True
 
     # ERC-8004 on GOAT Testnet3
     erc8004_chain_id: int = 48816

@@ -21,6 +21,7 @@ class KrewHubClient:
         api_key: str,
         jwt_token: str | None = None,
         acting_as_agent_id: int | None = None,
+        verify_ssl: bool = True,
     ) -> None:
         headers: dict[str, str] = {}
         if jwt_token:
@@ -34,6 +35,7 @@ class KrewHubClient:
             base_url=base_url,
             headers=headers,
             timeout=30.0,
+            verify=verify_ssl,
         )
 
     async def close(self) -> None:

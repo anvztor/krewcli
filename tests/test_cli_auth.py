@@ -57,6 +57,31 @@ class TestWalletCommands:
         assert "No wallet found" in result.output
 
 
+class TestSessionKeyCommands:
+    def test_session_key_create(self, runner, tmp_path):
+        with patch("krewcli.session_key._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["session-key", "create"])
+
+        assert result.exit_code == 0
+        assert "Session key created: 0x" in result.output
+        assert (tmp_path / "session_key").is_file()
+
+    def test_session_key_address(self, runner, tmp_path):
+        with patch("krewcli.session_key._DEFAULT_DIR", tmp_path):
+            runner.invoke(main, ["session-key", "create"])
+            result = runner.invoke(main, ["session-key", "address"])
+
+        assert result.exit_code == 0
+        assert result.output.strip().startswith("0x")
+
+    def test_session_key_address_missing(self, runner, tmp_path):
+        with patch("krewcli.session_key._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["session-key", "address"])
+
+        assert result.exit_code == 1
+        assert "No session key" in result.output
+
+
 class TestLoginCommand:
     def test_login_device_flow_approved(self, runner, tmp_path):
         """Device flow: request code → poll → approved → JWT saved."""
@@ -94,11 +119,13 @@ class TestLoginCommand:
         with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
              patch("time.sleep"), \
              patch("webbrowser.open"), \
+             patch("krewcli.gateway._get_owner_label", return_value="local"), \
              patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
             result = runner.invoke(main, ["login"])
 
         assert result.exit_code == 0
-        assert "Logged in as acc_test123456" in result.output
+        assert "Logged in as @local" in result.output
+        assert "Account: acc_test123456" in result.output
         assert (tmp_path / "token").read_text().strip() == "jwt-test-token"
 
     def test_login_connection_error(self, runner):
@@ -115,3 +142,65 @@ class TestLoginCommand:
 
         assert result.exit_code == 1
         assert "Could not connect" in result.output or "krewauth" in result.output
+
+    def test_login_code_expired(self, runner, tmp_path):
+        from unittest.mock import MagicMock
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        request_resp = MagicMock()
+        request_resp.status_code = 200
+        request_resp.raise_for_status = MagicMock()
+        request_resp.json.return_value = {
+            "device_code": "dc_test",
+            "user_code": "ABCD-1234",
+            "expires_in": 600,
+        }
+
+        expired_resp = MagicMock()
+        expired_resp.status_code = 404
+
+        mock_client.post.side_effect = [request_resp, expired_resp]
+
+        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
+             patch("time.sleep"), \
+             patch("webbrowser.open"), \
+             patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["login"])
+
+        assert result.exit_code == 1
+        assert "Code expired" in result.output
+
+    def test_login_times_out_waiting_for_approval(self, runner, tmp_path):
+        from unittest.mock import MagicMock
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        request_resp = MagicMock()
+        request_resp.status_code = 200
+        request_resp.raise_for_status = MagicMock()
+        request_resp.json.return_value = {
+            "device_code": "dc_test",
+            "user_code": "ABCD-1234",
+            "expires_in": 2,
+        }
+
+        pending_resp = MagicMock()
+        pending_resp.status_code = 200
+        pending_resp.raise_for_status = MagicMock()
+        pending_resp.json.return_value = {"status": "pending"}
+
+        mock_client.post.side_effect = [request_resp, pending_resp]
+
+        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
+             patch("time.sleep"), \
+             patch("webbrowser.open"), \
+             patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
+            result = runner.invoke(main, ["login"])
+
+        assert result.exit_code == 1
+        assert "Timed out waiting for approval" in result.output

@@ -270,15 +270,18 @@ def _resolve_mode(agent, provider, model, framework, endpoint, orchestrator, hos
         return "remote", executor, card, f"Remote ({endpoint})", ["code"]
 
     if orchestrator:
-        from krewcli.a2a.executors.orchestrator_agent import OrchestratorExecutor, build_orchestrator_card
+        from krewcli.a2a.executors.planner_agent import (
+            PlannerOrchestratorExecutor,
+            build_planner_card,
+        )
         krewhub_client = KrewHubClient(settings.krewhub_url, settings.api_key, verify_ssl=settings.verify_ssl)
         cookbook = settings.default_cookbook_id
-        executor = OrchestratorExecutor(
+        executor = PlannerOrchestratorExecutor(
             krewhub_client=krewhub_client,
             cookbook_id=cookbook,
         )
-        card = build_orchestrator_card(host, port)
-        return "orchestrator", executor, card, "Orchestrator", ["orchestrate", "plan", "decompose", "coordinate"]
+        card = build_planner_card(host, port)
+        return "orchestrator", executor, card, "Planner", ["generate-graph"]
 
     raise click.UsageError("Specify one of: --agent, --provider, --framework, --endpoint, or --orchestrator")
 

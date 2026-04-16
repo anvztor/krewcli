@@ -41,6 +41,7 @@ def create_gateway_app(
     max_concurrent: int = 1,
     recipe_contexts: dict[str, dict] | None = None,
     krewhub_client=None,
+    cookbook_id: str = "",
 ) -> tuple[Starlette, SpawnManager, list[str]]:
     """Create a multi-agent gateway Starlette app.
 
@@ -83,6 +84,8 @@ def create_gateway_app(
             spawn_manager=spawn_manager,
             agent_id=agent_id,
             max_concurrent=max_concurrent,
+            krewhub_client=krewhub_client,
+            cookbook_id=cookbook_id,
         )
 
         handler = DefaultRequestHandler(

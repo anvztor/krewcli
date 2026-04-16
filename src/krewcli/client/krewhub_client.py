@@ -382,3 +382,37 @@ class KrewHubClient:
         )
         resp.raise_for_status()
         return resp.json()["presence"]
+
+    # ────────────────────────────────────────────────────────────
+    # Daemon runtime (Phase 3 M1)
+    # ────────────────────────────────────────────────────────────
+
+    async def register_runtime(
+        self,
+        agent_id: str,
+        account_id: str,
+        daemon_version: str | None = None,
+        provider: str | None = None,
+        host_info: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Register this daemon instance. Returns the runtime id."""
+        resp = await self._client.post(
+            "/api/v1/agents/runtime/register",
+            json={
+                "agent_id": agent_id,
+                "account_id": account_id,
+                "daemon_version": daemon_version,
+                "provider": provider,
+                "host_info": host_info or {},
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["runtime"]
+
+    async def heartbeat_runtime(self, runtime_id: str) -> dict[str, Any]:
+        """Heartbeat this daemon so the server marks it online."""
+        resp = await self._client.post(
+            f"/api/v1/agents/runtime/{runtime_id}/heartbeat",
+        )
+        resp.raise_for_status()
+        return resp.json()["runtime"]

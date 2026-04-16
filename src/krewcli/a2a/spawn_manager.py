@@ -41,6 +41,10 @@ class SpawnSession:
     agent_name: str
     agent_id: str
     task: asyncio.Task | None = None
+    # Background task that polls krewhub for cancellation and signals
+    # the main task by setting cancel_event. Cleaned up on spawn completion.
+    cancel_watcher: asyncio.Task | None = None
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -143,10 +147,63 @@ class SpawnManager:
             ),
             name=f"spawn:{agent_name}:{task_id}",
         )
+
+        # Start the cancel-watcher. It polls krewhub for cancellation
+        # every 5 seconds and cancels the spawn task if the server marks
+        # this task as cancelled (e.g. via bundle cancel).
+        if self._krewhub_client is not None:
+            session.cancel_watcher = asyncio.create_task(
+                self._watch_cancellation(session),
+                name=f"cancel_watch:{task_id}",
+            )
+
         logger.info(
             "SpawnManager: spawned %s for task %s", agent_name, task_id,
         )
         return True
+
+    async def _watch_cancellation(self, session: SpawnSession) -> None:
+        """Poll krewhub for cancellation, signal the main spawn task on hit.
+
+        Polls every 5s. When the task is marked cancelled server-side
+        (e.g. user clicks Cancel on the bundle), this loop wakes up,
+        cancels the spawn asyncio.Task, and signals the event so any
+        final cleanup can complete quickly.
+        """
+        import httpx
+        poll_interval = 5.0
+        client = self._krewhub_client
+        if client is None:
+            return
+        try:
+            while True:
+                await asyncio.sleep(poll_interval)
+                # Session may have been removed (task completed)
+                if session.task_id not in self._sessions:
+                    return
+                try:
+                    # Using the raw http client from KrewHubClient
+                    resp = await client._client.get(  # type: ignore[attr-defined]
+                        f"/api/v1/tasks/{session.task_id}/cancel-status",
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("cancelled"):
+                            logger.warning(
+                                "SpawnManager: task %s cancelled by server, killing subprocess",
+                                session.task_id,
+                            )
+                            session.cancel_event.set()
+                            if session.task is not None and not session.task.done():
+                                session.task.cancel()
+                            return
+                except httpx.HTTPError as exc:
+                    logger.debug(
+                        "SpawnManager: cancel-status poll failed for %s: %s",
+                        session.task_id, exc,
+                    )
+        except asyncio.CancelledError:
+            return
 
     async def _run_and_report(
         self,
@@ -158,14 +215,33 @@ class SpawnManager:
     ) -> None:
         """Execute CLI agent and report results to krewhub callback."""
         sink = self._build_event_sink(session)
+        was_cancelled = False
         try:
             result = await self._execute(
                 session.agent_name, prompt,
                 working_dir=working_dir, repo_url=repo_url, branch=branch,
                 event_sink=sink,
             )
+        except asyncio.CancelledError:
+            # Cancel watcher tripped — emit a marker event and report
+            # a failed result so the server knows execution stopped.
+            was_cancelled = True
+            logger.info(
+                "SpawnManager: task %s cancelled mid-execution",
+                session.task_id,
+            )
+            result = SpawnResult(
+                task_id=session.task_id,
+                agent_id=session.agent_id,
+                success=False,
+                summary="Task cancelled by user",
+                blocked_reason="cancelled",
+            )
         finally:
             await sink.flush()
+            # Stop the cancel watcher (no-op if it already exited)
+            if session.cancel_watcher is not None and not session.cancel_watcher.done():
+                session.cancel_watcher.cancel()
 
         result.task_id = session.task_id
         result.agent_id = session.agent_id
@@ -176,8 +252,8 @@ class SpawnManager:
             await self._report_callback(result)
 
         logger.info(
-            "SpawnManager: task %s finished (success=%s)",
-            session.task_id, result.success,
+            "SpawnManager: task %s finished (success=%s, cancelled=%s)",
+            session.task_id, result.success, was_cancelled,
         )
 
     def _build_event_sink(self, session: SpawnSession) -> EventSink:

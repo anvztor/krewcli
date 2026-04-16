@@ -152,7 +152,12 @@ class KrewhubEventSink:
                 )
 
     async def flush(self) -> None:
-        """Drain the queue and stop the background flusher."""
+        """Drain the queue and stop the background flusher.
+
+        If any events were dropped under back-pressure, a final
+        ``event_sink_telemetry`` event is posted so downstream
+        observers (digest, UI) can surface data-loss warnings.
+        """
         if self._closed:
             return
         self._closed = True
@@ -175,6 +180,22 @@ class KrewhubEventSink:
                 self._queue.task_done()
             except asyncio.QueueEmpty:
                 break
+
+        # If events were dropped, append a telemetry event to the final batch
+        if self._dropped > 0:
+            batch.append({
+                "type": MILESTONE,  # use existing event type
+                "actor_id": self._agent_id,
+                "actor_type": "agent",
+                "body": f"⚠ Event sink dropped {self._dropped} event(s) under back-pressure",
+                "payload": {
+                    "_telemetry": "event_sink",
+                    "dropped_count": self._dropped,
+                    "batch_size": self._batch_size,
+                    "queue_size": self._queue.maxsize,
+                },
+            })
+
         if batch:
             await self._post_batch(batch)
 

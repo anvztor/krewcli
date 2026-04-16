@@ -268,6 +268,7 @@ async def run_gateway(
         owner=owner,
         agent_names=[n for n in registered_agents],
         on_invocation=_handle_a2a_invocation,
+        token_reloader=_lt,
     )
     sse_watcher.start()
 

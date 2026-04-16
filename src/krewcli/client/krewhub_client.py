@@ -1,8 +1,47 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
+
+from krewcli.auth.token_store import load_token
+
+logger = logging.getLogger(__name__)
+
+
+class _RefreshingBearerAuth(httpx.Auth):
+    """httpx.Auth that re-reads ~/.krewcli/token from disk on 401.
+
+    Long-running daemons (e.g. `krewcli join`) cache the JWT at startup.
+    When the token is rotated on disk, in-flight requests start returning
+    401. This auth handler retries once after reloading the token file,
+    so a simple `krewcli login` re-auth suffices to recover without
+    restarting the daemon.
+    """
+
+    requires_response_body = False
+
+    def __init__(self, initial_token: str) -> None:
+        self._token = initial_token
+
+    def _auth_header(self) -> str:
+        return f"Bearer {self._token}"
+
+    def auth_flow(self, request):  # type: ignore[override]
+        request.headers["Authorization"] = self._auth_header()
+        response = yield request
+        if response.status_code != 401:
+            return
+        fresh = load_token()
+        if not fresh or fresh == self._token:
+            return
+        logger.warning(
+            "krewhub returned 401; reloaded token from disk and retrying once"
+        )
+        self._token = fresh
+        request.headers["Authorization"] = self._auth_header()
+        yield request
 
 
 class KrewHubClient:
@@ -13,6 +52,10 @@ class KrewHubClient:
       2. X-API-Key (legacy, from config)
 
     Set acting_as_agent_id to include X-Acting-As header for agent-mode ops.
+
+    When using a Bearer JWT, the client automatically re-reads the token
+    from disk on 401 and retries once, so long-running daemons recover
+    from token rotation without needing a restart.
     """
 
     def __init__(
@@ -24,8 +67,9 @@ class KrewHubClient:
         verify_ssl: bool = True,
     ) -> None:
         headers: dict[str, str] = {}
+        auth: httpx.Auth | None = None
         if jwt_token:
-            headers["Authorization"] = f"Bearer {jwt_token}"
+            auth = _RefreshingBearerAuth(jwt_token)
         else:
             headers["X-API-Key"] = api_key
         if acting_as_agent_id is not None:
@@ -34,6 +78,7 @@ class KrewHubClient:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers=headers,
+            auth=auth,
             timeout=30.0,
             verify=verify_ssl,
         )

@@ -772,15 +772,16 @@ class TestHandleRegularTaskStreamsEvents:
         hub_client.post_recipe_event = AsyncMock()
 
         await _handle_regular_task(
-            client=hub_client,
-            spawn_manager=spawn_mgr,
-            agent_name="codex",
-            text="do stuff",
-            task_id="task_live_1",
-            recipe_id="rec_1",
-            working_dir="/tmp/test",
-            repo_url="",
-            branch="main",
+            hub_client,
+            spawn_mgr,
+            "codex",
+            "do stuff",
+            "task_live_1",
+            "rec_1",
+            "bun_1",
+            "/tmp/test",
+            "",
+            "main",
         )
 
         sink = captured.get("event_sink")
@@ -792,6 +793,55 @@ class TestHandleRegularTaskStreamsEvents:
             f"expected KrewhubEventSink when a krewhub_client is configured, "
             f"got {type(sink).__name__}"
         )
+
+    @pytest.mark.asyncio
+    async def test_regular_task_builds_context_for_cli_agents(self):
+        """Codex agent's rollout watcher forwards events via env vars
+        (KREWHUB_TASK_ID / KREWHUB_URL / KREWHUB_API_KEY). _handle_regular_task
+        must wire those into AgentDeps.context so the watcher can
+        authenticate and address events to the right task.
+        """
+        from krewcli.gateway import _handle_regular_task
+        from krewcli.a2a.spawn_manager import SpawnResult
+
+        spawn_mgr = SpawnManager(working_dir="/tmp/test")
+
+        captured: dict = {}
+
+        async def fake_execute(**kwargs):
+            captured["context"] = kwargs.get("context")
+            return SpawnResult(task_id="", agent_id="codex", success=True, summary="ok")
+
+        spawn_mgr._execute = fake_execute  # type: ignore[method-assign]
+
+        hub_client = Mock()
+        hub_client.update_task_status = AsyncMock()
+        hub_client.post_recipe_event = AsyncMock()
+
+        fake_settings = Mock()
+        fake_settings.krewhub_url = "https://hub.test"
+        fake_settings.api_key = "key-xyz"
+
+        await _handle_regular_task(
+            hub_client,
+            spawn_mgr,
+            "codex",
+            "do stuff",
+            "task_ABC",
+            "rec_1",
+            "bun_1",
+            "/tmp/test",
+            "",
+            "main",
+            settings=fake_settings,
+        )
+
+        ctx = captured.get("context") or {}
+        assert ctx.get("KREWHUB_TASK_ID") == "task_ABC"
+        assert ctx.get("KREWHUB_RECIPE_ID") == "rec_1"
+        assert ctx.get("KREWHUB_BUNDLE_ID") == "bun_1"
+        assert ctx.get("KREWHUB_URL") == "https://hub.test"
+        assert ctx.get("KREWHUB_API_KEY") == "key-xyz"
 
     @pytest.mark.asyncio
     async def test_regular_task_falls_back_to_null_sink_without_client(self):
@@ -815,15 +865,16 @@ class TestHandleRegularTaskStreamsEvents:
         hub_client.post_recipe_event = AsyncMock()
 
         await _handle_regular_task(
-            client=hub_client,
-            spawn_manager=spawn_mgr,
-            agent_name="codex",
-            text="noop",
-            task_id="task_live_2",
-            recipe_id="rec_1",
-            working_dir="/tmp/test",
-            repo_url="",
-            branch="main",
+            hub_client,
+            spawn_mgr,
+            "codex",
+            "noop",
+            "task_live_2",
+            "rec_1",
+            "bun_2",
+            "/tmp/test",
+            "",
+            "main",
         )
 
         sink = captured.get("event_sink")

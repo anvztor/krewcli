@@ -257,9 +257,11 @@ async def run_gateway(
 
         task_id = metadata.get("task_id")
         recipe_id_meta = metadata.get("recipe_id", "")
+        bundle_id_meta = metadata.get("bundle_id", "")
         return await _handle_regular_task(
             client, spawn_manager, agent_name, text,
-            task_id, recipe_id_meta, working_dir, repo_url, branch,
+            task_id, recipe_id_meta, bundle_id_meta, working_dir, repo_url, branch,
+            settings=settings,
         )
 
     sse_watcher = SSEWatcher(
@@ -383,18 +385,40 @@ async def _handle_planner_task(
 
 async def _handle_regular_task(
     client, spawn_manager, agent_name, text,
-    task_id, recipe_id, working_dir, repo_url, branch,
+    task_id, recipe_id, bundle_id, working_dir, repo_url, branch,
+    *, settings=None,
 ) -> dict:
     """Handle a regular task: run agent CLI and update krewhub task status.
 
     Streams execution events (tool_use, thinking, session_*) to krewhub
-    via a task-scoped event sink so the cookrew workspace feed can
-    render them live. Without this sink the UI only ever sees the
-    terminal status transition (claimed → done) with no detail.
+    via two channels:
+      - event_sink: used by agents that emit via sink.emit() (claude_agent)
+      - deps.context: used by codex_agent's rollout watcher, which
+        forwards events via bridge/forwarder.py using KREWHUB_TASK_ID /
+        KREWHUB_URL / KREWHUB_API_KEY env keys.
+
+    Without both, the UI only sees the terminal status transition
+    (claimed → done) with no intermediate activity.
     """
     # Build a sink up front so a `finally` flush is always safe, even
     # if _execute raises before assigning to spawn_result.
     sink = spawn_manager.build_task_event_sink(task_id=task_id or "", agent_id=agent_name)
+
+    # Context for CLI-backed agents (codex). bridge/forwarder.py reads
+    # these keys from env to route events to the right task in krewhub.
+    context: dict[str, str] = {}
+    if task_id:
+        context["KREWHUB_TASK_ID"] = task_id
+    if recipe_id:
+        context["KREWHUB_RECIPE_ID"] = recipe_id
+    if bundle_id:
+        context["KREWHUB_BUNDLE_ID"] = bundle_id
+    if settings is not None:
+        if getattr(settings, "krewhub_url", None):
+            context["KREWHUB_URL"] = settings.krewhub_url
+        if getattr(settings, "api_key", None):
+            context["KREWHUB_API_KEY"] = settings.api_key
+
     try:
         if task_id:
             try:
@@ -409,6 +433,7 @@ async def _handle_regular_task(
             repo_url=repo_url,
             branch=branch,
             event_sink=sink,
+            context=context,
         )
 
         if spawn_result.success:

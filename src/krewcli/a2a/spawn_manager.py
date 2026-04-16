@@ -294,8 +294,15 @@ class SpawnManager:
         repo_url: str = "",
         branch: str = "main",
         event_sink: EventSink | None = None,
+        context: dict[str, str] | None = None,
     ) -> SpawnResult:
-        """Run the agent CLI and collect results."""
+        """Run the agent CLI and collect results.
+
+        `context` becomes `AgentDeps.context` and propagates to subprocess
+        env for CLI-backed agents. The codex rollout watcher needs
+        KREWHUB_TASK_ID / KREWHUB_URL / KREWHUB_API_KEY in context to
+        forward tool_use / thinking events back to krewhub.
+        """
         try:
             agent = get_agent(agent_name)
             deps = AgentDeps(
@@ -303,6 +310,7 @@ class SpawnManager:
                 repo_url=repo_url or self._repo_url,
                 branch=branch or self._branch,
                 event_sink=event_sink,
+                context=context or {},
             )
             run_result: AgentRunResult = await agent.run(prompt, deps=deps)
             task_result: TaskResult = run_result.output

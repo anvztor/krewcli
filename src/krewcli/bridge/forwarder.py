@@ -105,6 +105,7 @@ def forward(
     source = env if env is not None else os.environ
     krewhub_url = source.get("KREWHUB_URL", "http://127.0.0.1:8420").rstrip("/")
     api_key = source.get("KREWHUB_API_KEY", "dev-api-key")
+    jwt_token = source.get("KREWHUB_JWT", "").strip()
     task_id = source.get("KREWHUB_TASK_ID", "").strip()
     recipe_id = source.get("KREWHUB_RECIPE_ID", "").strip()
     bundle_id = source.get("KREWHUB_BUNDLE_ID", "").strip()
@@ -114,10 +115,14 @@ def forward(
     actor_id = _build_actor_id(event, env=env)
     event_type = krewhub_event_type(event.hook_event_name)
 
-    headers = {
-        "X-API-Key": api_key,
-        "Content-Type": "application/json",
-    }
+    # Prefer Bearer JWT when available — matches the agent's live session
+    # and works in prod where the legacy X-API-Key is rotated/unknown.
+    # Fall back to X-API-Key for local dev + legacy hook callers.
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if jwt_token:
+        headers["Authorization"] = f"Bearer {jwt_token}"
+    else:
+        headers["X-API-Key"] = api_key
 
     if task_id:
         url = f"{krewhub_url}/api/v1/tasks/{task_id}/events"

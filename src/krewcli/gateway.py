@@ -261,7 +261,7 @@ async def run_gateway(
         return await _handle_regular_task(
             client, spawn_manager, agent_name, text,
             task_id, recipe_id_meta, bundle_id_meta, working_dir, repo_url, branch,
-            settings=settings,
+            settings=settings, jwt_token=_lt() or "",
         )
 
     sse_watcher = SSEWatcher(
@@ -386,7 +386,7 @@ async def _handle_planner_task(
 async def _handle_regular_task(
     client, spawn_manager, agent_name, text,
     task_id, recipe_id, bundle_id, working_dir, repo_url, branch,
-    *, settings=None,
+    *, settings=None, jwt_token: str = "",
 ) -> dict:
     """Handle a regular task: run agent CLI and update krewhub task status.
 
@@ -418,6 +418,11 @@ async def _handle_regular_task(
             context["KREWHUB_URL"] = settings.krewhub_url
         if getattr(settings, "api_key", None):
             context["KREWHUB_API_KEY"] = settings.api_key
+    if jwt_token:
+        # bridge/forwarder.py prefers Bearer JWT over X-API-Key — this
+        # keeps the event stream on the agent's live session instead
+        # of a shared dev key that prod doesn't even honor.
+        context["KREWHUB_JWT"] = jwt_token
 
     try:
         if task_id:

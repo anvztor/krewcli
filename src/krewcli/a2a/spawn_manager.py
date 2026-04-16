@@ -257,19 +257,33 @@ class SpawnManager:
         )
 
     def _build_event_sink(self, session: SpawnSession) -> EventSink:
-        """Construct an event sink for a spawn session.
+        """Construct an event sink for a spawn session."""
+        return self.build_task_event_sink(
+            task_id=session.task_id, agent_id=session.agent_id,
+        )
+
+    def build_task_event_sink(self, task_id: str, agent_id: str) -> EventSink:
+        """Public helper — build a task-scoped event sink.
 
         Returns a NullEventSink unless streaming is enabled AND a
         KrewHubClient is available. The KrewhubEventSink batches emits
         and POSTs them to /tasks/{id}/events:batch so cookrew can
         render tool calls and assistant replies live.
+
+        Used both by the SpawnSession path and by gateway handlers that
+        drive _execute directly and need a sink without a full session.
         """
         if not _STREAM_EVENTS_ENABLED or self._krewhub_client is None:
             return NullEventSink()
+        if not task_id:
+            # KrewhubEventSink POSTs to /api/v1/tasks/{id}/events:batch —
+            # with an empty task_id those calls 404. Callers without a
+            # task scope (e.g. planner codegen) get a null sink instead.
+            return NullEventSink()
         return KrewhubEventSink(
             client=self._krewhub_client,
-            task_id=session.task_id,
-            agent_id=session.agent_id,
+            task_id=task_id,
+            agent_id=agent_id,
         )
 
     async def _execute(

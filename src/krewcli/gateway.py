@@ -335,12 +335,18 @@ async def _handle_planner_task(
         codegen_prompt = CODEGEN_PROMPT.format(prompt=text, agents=agent_summary)
 
         click.echo(f"  Running {agent_name} for graph codegen...")
+        # Planner codegen has no task scope — events have nowhere to
+        # post. Use a null sink explicitly for intent. If bundle-scoped
+        # streaming is added server-side later, swap this for a
+        # BundleEventSink.
+        sink = spawn_manager.build_task_event_sink(task_id="", agent_id=agent_name)
         spawn_result = await spawn_manager._execute(
             agent_name=agent_name,
             prompt=codegen_prompt,
             working_dir=working_dir,
             repo_url=repo_url,
             branch=branch,
+            event_sink=sink,
         )
 
         if not spawn_result.success:
@@ -379,7 +385,16 @@ async def _handle_regular_task(
     client, spawn_manager, agent_name, text,
     task_id, recipe_id, working_dir, repo_url, branch,
 ) -> dict:
-    """Handle a regular task: run agent CLI and update krewhub task status."""
+    """Handle a regular task: run agent CLI and update krewhub task status.
+
+    Streams execution events (tool_use, thinking, session_*) to krewhub
+    via a task-scoped event sink so the cookrew workspace feed can
+    render them live. Without this sink the UI only ever sees the
+    terminal status transition (claimed → done) with no detail.
+    """
+    # Build a sink up front so a `finally` flush is always safe, even
+    # if _execute raises before assigning to spawn_result.
+    sink = spawn_manager.build_task_event_sink(task_id=task_id or "", agent_id=agent_name)
     try:
         if task_id:
             try:
@@ -393,6 +408,7 @@ async def _handle_regular_task(
             working_dir=working_dir,
             repo_url=repo_url,
             branch=branch,
+            event_sink=sink,
         )
 
         if spawn_result.success:
@@ -437,3 +453,10 @@ async def _handle_regular_task(
             except Exception:
                 pass
         return {"text": f"Error: {e}", "success": False}
+    finally:
+        # Drain buffered tool_use / thinking / session events so the
+        # UI sees the full run, not just the terminal status update.
+        try:
+            await sink.flush()
+        except Exception:
+            logger.exception("event sink flush failed for task %s", task_id)

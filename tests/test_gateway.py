@@ -732,3 +732,100 @@ class TestCreateGatewayAppWithRecipeContexts:
 
         assert spawn_mgr._recipe_contexts == contexts
         assert registered == ["claude"]
+
+
+class TestHandleRegularTaskStreamsEvents:
+    """Regression: _handle_regular_task must build a real event sink so
+    agent tool_use / thinking / session events stream to krewhub as the
+    task runs, letting the cookrew workspace event feed render live.
+    """
+
+    @pytest.mark.asyncio
+    async def test_regular_task_passes_real_event_sink_to_execute(self):
+        from krewcli.gateway import _handle_regular_task
+        from krewcli.agents.event_sink import KrewhubEventSink, NullEventSink
+        from krewcli.a2a.spawn_manager import SpawnResult
+
+        krewhub_client = Mock()
+        krewhub_client.post_events_batch = AsyncMock()
+
+        spawn_mgr = SpawnManager(
+            working_dir="/tmp/test",
+            krewhub_client=krewhub_client,
+        )
+
+        captured: dict = {}
+
+        async def fake_execute(**kwargs):
+            captured["event_sink"] = kwargs.get("event_sink")
+            return SpawnResult(
+                task_id=kwargs.get("task_id", ""),
+                agent_id="codex",
+                success=True,
+                summary="ok",
+            )
+
+        spawn_mgr._execute = fake_execute  # type: ignore[method-assign]
+
+        hub_client = Mock()
+        hub_client.update_task_status = AsyncMock()
+        hub_client.post_recipe_event = AsyncMock()
+
+        await _handle_regular_task(
+            client=hub_client,
+            spawn_manager=spawn_mgr,
+            agent_name="codex",
+            text="do stuff",
+            task_id="task_live_1",
+            recipe_id="rec_1",
+            working_dir="/tmp/test",
+            repo_url="",
+            branch="main",
+        )
+
+        sink = captured.get("event_sink")
+        assert sink is not None, (
+            "_handle_regular_task must pass an event_sink to _execute so "
+            "streaming events reach krewhub"
+        )
+        assert isinstance(sink, KrewhubEventSink), (
+            f"expected KrewhubEventSink when a krewhub_client is configured, "
+            f"got {type(sink).__name__}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_regular_task_falls_back_to_null_sink_without_client(self):
+        from krewcli.gateway import _handle_regular_task
+        from krewcli.agents.event_sink import NullEventSink
+        from krewcli.a2a.spawn_manager import SpawnResult
+
+        # No krewhub_client -> can't post, sink must be Null (not None)
+        spawn_mgr = SpawnManager(working_dir="/tmp/test")
+
+        captured: dict = {}
+
+        async def fake_execute(**kwargs):
+            captured["event_sink"] = kwargs.get("event_sink")
+            return SpawnResult(task_id="t", agent_id="codex", success=True, summary="ok")
+
+        spawn_mgr._execute = fake_execute  # type: ignore[method-assign]
+
+        hub_client = Mock()
+        hub_client.update_task_status = AsyncMock()
+        hub_client.post_recipe_event = AsyncMock()
+
+        await _handle_regular_task(
+            client=hub_client,
+            spawn_manager=spawn_mgr,
+            agent_name="codex",
+            text="noop",
+            task_id="task_live_2",
+            recipe_id="rec_1",
+            working_dir="/tmp/test",
+            repo_url="",
+            branch="main",
+        )
+
+        sink = captured.get("event_sink")
+        assert sink is not None
+        assert isinstance(sink, NullEventSink)

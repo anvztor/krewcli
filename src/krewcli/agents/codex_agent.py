@@ -38,6 +38,22 @@ from krewcli.agents.base import AgentDeps, AgentRunResult
 from krewcli.agents.models import CodeRefResult, TaskResult
 from krewcli.bridge.codex_watcher import CodexRolloutWatcher
 
+# Vars to inherit from the host process. Everything else (especially
+# stale KREWHUB_* from prior gateway sessions) is excluded. Task-scoped
+# vars arrive via deps.context and are overlaid on top.
+_SAFE_HOST_VARS = frozenset({
+    "PATH", "HOME", "SHELL", "TERM", "USER", "LANG", "LC_ALL", "LC_CTYPE",
+    "TMPDIR", "SSH_AUTH_SOCK", "DISPLAY", "XDG_RUNTIME_DIR",
+    # Auth providers codex may need
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+})
+
+
+def _safe_host_env() -> dict[str, str]:
+    """Return a filtered copy of os.environ with only safe host vars."""
+    return {k: v for k, v in os.environ.items() if k in _SAFE_HOST_VARS}
+
+
 _ROLLOUT_SUMMARY_HINT: ContextVar[Path | None] = ContextVar(
     "codex_rollout_summary_hint",
     default=None,
@@ -51,14 +67,16 @@ class CodexRolloutAgent:
     name: str = "Codex"
 
     async def run(self, prompt: str, *, deps: AgentDeps) -> AgentRunResult:
-        # Deliberately drop CODEX_HOME from the spawn env — we do
-        # NOT want codex to look at our workspace-local `.codex`
-        # because it has no auth.json and would 401 on every call.
-        # Vibe-island's CodexSessionWatcher tails the user's real
-        # global ~/.codex/sessions/ for the same reason.
+        # Build a clean subprocess env: allowlisted host vars + task
+        # context. Previously this was `{**os.environ, **base_env}` which
+        # leaked stale KREWHUB_* vars from prior gateway sessions,
+        # contaminating unrelated bundles with misrouted hook events.
+        #
+        # Also deliberately drops CODEX_HOME — we don't want codex to
+        # look at our workspace-local `.codex` because it has no
+        # auth.json and would 401.
         base_env = {k: v for k, v in (deps.context or {}).items() if k != "CODEX_HOME"}
-        env = {**os.environ, **base_env}
-        env.pop("CODEX_HOME", None)
+        env = {**_safe_host_env(), **base_env}
 
         args = [
             "codex",

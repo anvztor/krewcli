@@ -406,7 +406,11 @@ async def _handle_regular_task(
 
     # Context for CLI-backed agents (codex). bridge/forwarder.py reads
     # these keys from env to route events to the right task in krewhub.
-    context: dict[str, str] = {}
+    # Session token: unique per spawn, used by krewhub (L4) to reject
+    # events from stale/unrelated sessions, and by global hooks (L3)
+    # as a gate before forwarding.
+    import uuid
+    context: dict[str, str] = {"KREWHUB_SESSION_TOKEN": str(uuid.uuid4())}
     if task_id:
         context["KREWHUB_TASK_ID"] = task_id
     if recipe_id:

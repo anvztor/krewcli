@@ -842,6 +842,10 @@ class TestHandleRegularTaskStreamsEvents:
         assert ctx.get("KREWHUB_BUNDLE_ID") == "bun_1"
         assert ctx.get("KREWHUB_URL") == "https://hub.test"
         assert ctx.get("KREWHUB_API_KEY") == "key-xyz"
+        # L2: session token must be generated for every spawn
+        session_token = ctx.get("KREWHUB_SESSION_TOKEN")
+        assert session_token is not None, "KREWHUB_SESSION_TOKEN missing from context"
+        assert len(session_token) == 36, "expected UUID-format session token"
 
     @pytest.mark.asyncio
     async def test_regular_task_falls_back_to_null_sink_without_client(self):

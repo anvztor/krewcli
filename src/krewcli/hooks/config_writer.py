@@ -113,10 +113,19 @@ def _build_hook_commands(listener_url: str, hook_format: str) -> dict[str, list[
     hooks: dict[str, list[dict]] = {}
     for event in events:
         endpoint = f"{listener_url}/hooks/{event.lower()}"
+        # Guard: only fire when KREWHUB_SESSION_TOKEN is set in this
+        # process's environment. Prevents stale global hooks from
+        # forwarding events from unrelated codex/claude sessions
+        # that happen to run while the gateway isn't active or was
+        # restarted with a different task. (L3 of session isolation.)
+        guarded_cmd = (
+            f'test -n "$KREWHUB_SESSION_TOKEN" && '
+            f'curl -s -X POST {endpoint} -H "Content-Type: application/json" -d @- 2>/dev/null || true'
+        )
         hooks[event] = [{
             "hooks": [{
                 "type": "command",
-                "command": f'curl -s -X POST {endpoint} -H "Content-Type: application/json" -d @- 2>/dev/null || true',
+                "command": guarded_cmd,
             }],
             "matcher": "*",
             "_krewcli": True,

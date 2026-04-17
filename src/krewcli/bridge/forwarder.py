@@ -106,6 +106,7 @@ def forward(
     krewhub_url = source.get("KREWHUB_URL", "http://127.0.0.1:8420").rstrip("/")
     api_key = source.get("KREWHUB_API_KEY", "dev-api-key")
     jwt_token = source.get("KREWHUB_JWT", "").strip()
+    session_token = source.get("KREWHUB_SESSION_TOKEN", "").strip()
     task_id = source.get("KREWHUB_TASK_ID", "").strip()
     recipe_id = source.get("KREWHUB_RECIPE_ID", "").strip()
     bundle_id = source.get("KREWHUB_BUNDLE_ID", "").strip()
@@ -126,7 +127,7 @@ def forward(
 
     if task_id:
         url = f"{krewhub_url}/api/v1/tasks/{task_id}/events"
-        body_json = {
+        body_json: dict = {
             "type": event_type,
             "actor_id": actor_id,
             "actor_type": "hook",
@@ -135,6 +136,8 @@ def forward(
             "code_refs": [],
             "payload": payload,
         }
+        if session_token:
+            body_json["session_token"] = session_token
     else:
         # Fallback for ad-hoc runs without a bound task. Uses the
         # recipe-level ingest endpoint that already understands the
@@ -150,6 +153,8 @@ def forward(
             "cwd": event.cwd,
             "payload": payload,
         }
+        if session_token:
+            body_json["session_token"] = session_token
 
     try:
         resp = httpx.post(

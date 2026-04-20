@@ -17,6 +17,7 @@ dependencies = [
     "eth-account>=0.13.0",
     "eth-abi>=5.0.0",
     "web3>=7.0.0",
+    "republic>=0.5.4",
 ]
 
 [project.optional-dependencies]

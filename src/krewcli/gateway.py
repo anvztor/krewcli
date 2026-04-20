@@ -463,6 +463,14 @@ async def _handle_regular_task(
                     )
                 except Exception as e:
                     click.echo(f"  Warning: failed to update task status: {e}")
+
+            # Push fork tape entries to krewhub
+            if recipe_id and bundle_id and task_id:
+                await _push_fork_tape(
+                    settings, recipe_id, bundle_id, task_id,
+                    spawn_result, agent_name,
+                )
+
             return {
                 "text": spawn_result.summary or spawn_result.full_output,
                 "success": True,
@@ -494,3 +502,46 @@ async def _handle_regular_task(
             await sink.flush()
         except Exception:
             logger.exception("event sink flush failed for task %s", task_id)
+
+
+async def _push_fork_tape(settings, recipe_id, bundle_id, task_id, spawn_result, agent_name):
+    """Push fork tape entries (milestone + handoff anchor) to krewhub.
+
+    Best-effort: failures are logged but never block task completion.
+    """
+    from krewcli.storage.fork_tape import ForkTape
+    from krewcli.storage.tape_client import TapeStorageClient
+
+    try:
+        fork = ForkTape(bundle_id, task_id)
+        fork.append("milestone", {
+            "body": spawn_result.summary or "Task completed",
+            "files_modified": spawn_result.files_modified,
+        }, meta={"actor_id": agent_name})
+
+        code_ref = spawn_result.code_refs[0] if spawn_result.code_refs else None
+        fork.write_handoff_anchor(
+            summary=spawn_result.summary or "Task completed",
+            code_ref=code_ref,
+            facts=spawn_result.facts if spawn_result.facts else None,
+        )
+
+        pushable = fork.to_pushable()
+        if not pushable:
+            return
+
+        tape_client = TapeStorageClient(
+            base_url=getattr(settings, "krewhub_url", ""),
+            api_key=getattr(settings, "api_key", ""),
+        )
+        try:
+            await tape_client.push_fork_entries(
+                recipe_id, bundle_id, task_id, pushable,
+            )
+            logger.info(
+                "fork tape: pushed %d entries for task %s", len(pushable), task_id,
+            )
+        finally:
+            await tape_client.close()
+    except Exception:
+        logger.debug("fork tape push failed for task %s", task_id, exc_info=True)

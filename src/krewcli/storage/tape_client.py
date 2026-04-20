@@ -77,6 +77,25 @@ class TapeStorageClient:
         resp.raise_for_status()
         return resp.json().get("entry", {})
 
+    async def push_fork_entries(
+        self,
+        recipe_id: str,
+        bundle_id: str,
+        task_id: str,
+        entries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Push fork tape entries to krewhub."""
+        resp = await self._client.post(
+            f"/api/v1/tapes/{recipe_id}/fork-entries",
+            json={
+                "bundle_id": bundle_id,
+                "task_id": task_id,
+                "entries": entries,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 
 def _build_summary(entries: list[dict]) -> str:
     """Build a human-readable summary from tape entries."""

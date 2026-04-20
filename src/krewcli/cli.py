@@ -376,7 +376,7 @@ def claim(ctx, task_id, recipe, agent, agent_id, workdir):
     async def _run():
         repo_url, branch = await _load_recipe_context(client, recipe)
         heartbeat = HeartbeatLoop(
-            client=client, agent_id=resolved_id, recipe_id=recipe,
+            client=client, agent_id=resolved_id, cookbook_id=recipe,
             display_name=info["display_name"], capabilities=info["capabilities"],
             interval=settings.heartbeat_interval,
         )

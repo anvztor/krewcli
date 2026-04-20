@@ -468,7 +468,7 @@ async def _handle_regular_task(
             if recipe_id and bundle_id and task_id:
                 await _push_fork_tape(
                     settings, recipe_id, bundle_id, task_id,
-                    spawn_result, agent_name,
+                    spawn_result, agent_name, jwt_token=jwt_token,
                 )
 
             return {
@@ -504,13 +504,15 @@ async def _handle_regular_task(
             logger.exception("event sink flush failed for task %s", task_id)
 
 
-async def _push_fork_tape(settings, recipe_id, bundle_id, task_id, spawn_result, agent_name):
+async def _push_fork_tape(
+    settings, recipe_id, bundle_id, task_id, spawn_result, agent_name,
+    *, jwt_token: str = "",
+):
     """Push fork tape entries (milestone + handoff anchor) to krewhub.
 
     Best-effort: failures are logged but never block task completion.
     """
     from krewcli.storage.fork_tape import ForkTape
-    from krewcli.storage.tape_client import TapeStorageClient
 
     try:
         fork = ForkTape(bundle_id, task_id)
@@ -530,18 +532,36 @@ async def _push_fork_tape(settings, recipe_id, bundle_id, task_id, spawn_result,
         if not pushable:
             return
 
-        tape_client = TapeStorageClient(
-            base_url=getattr(settings, "krewhub_url", ""),
-            api_key=getattr(settings, "api_key", ""),
-        )
-        try:
-            await tape_client.push_fork_entries(
-                recipe_id, bundle_id, task_id, pushable,
+        base_url = getattr(settings, "krewhub_url", "") or ""
+        # Prefer JWT for auth (prod requires it), fall back to API key
+        token = jwt_token
+        if not token:
+            from krewcli.auth.token_store import load_token
+            token = load_token() or ""
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            api_key = getattr(settings, "api_key", "") or ""
+            if api_key:
+                headers["X-API-Key"] = api_key
+
+        async with httpx.AsyncClient(
+            base_url=base_url, headers=headers, timeout=30.0,
+        ) as client:
+            resp = await client.post(
+                f"/api/v1/tapes/{recipe_id}/fork-entries",
+                json={
+                    "bundle_id": bundle_id,
+                    "task_id": task_id,
+                    "entries": pushable,
+                },
             )
+            resp.raise_for_status()
             logger.info(
-                "fork tape: pushed %d entries for task %s", len(pushable), task_id,
+                "fork tape: pushed %d entries for task %s",
+                len(pushable), task_id,
             )
-        finally:
-            await tape_client.close()
     except Exception:
-        logger.debug("fork tape push failed for task %s", task_id, exc_info=True)
+        logger.warning("fork tape push failed for task %s", task_id, exc_info=True)

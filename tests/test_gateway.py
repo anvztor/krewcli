@@ -742,7 +742,7 @@ class TestHandleRegularTaskStreamsEvents:
 
     @pytest.mark.asyncio
     async def test_regular_task_passes_real_event_sink_to_execute(self):
-        from krewcli.gateway import _handle_regular_task
+        from krewcli.gateway_tasks import _handle_regular_task
         from krewcli.agents.event_sink import KrewhubEventSink, NullEventSink
         from krewcli.a2a.spawn_manager import SpawnResult
 
@@ -801,7 +801,7 @@ class TestHandleRegularTaskStreamsEvents:
         must wire those into AgentDeps.context so the watcher can
         authenticate and address events to the right task.
         """
-        from krewcli.gateway import _handle_regular_task
+        from krewcli.gateway_tasks import _handle_regular_task
         from krewcli.a2a.spawn_manager import SpawnResult
 
         spawn_mgr = SpawnManager(working_dir="/tmp/test")
@@ -849,7 +849,7 @@ class TestHandleRegularTaskStreamsEvents:
 
     @pytest.mark.asyncio
     async def test_regular_task_falls_back_to_null_sink_without_client(self):
-        from krewcli.gateway import _handle_regular_task
+        from krewcli.gateway_tasks import _handle_regular_task
         from krewcli.agents.event_sink import NullEventSink
         from krewcli.a2a.spawn_manager import SpawnResult
 

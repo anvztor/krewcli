@@ -5,7 +5,8 @@ import sys
 import pytest
 
 from krewcli.agents import base
-from krewcli.agents.base import AgentDeps, CommandResult, LocalCliAgent
+from krewcli.agents.base import AgentDeps
+from krewcli.agents.local_cli import CommandResult, LocalCliAgent
 from krewcli.agents.bub_agent import create_bub_agent
 from krewcli.agents.claude_agent import create_claude_agent
 from krewcli.agents.codex_agent import create_codex_agent

@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 
-from krewcli.agents.base import AgentDeps, AgentRunResult
+from krewcli.agents.base import AgentDeps, AgentRunResult, _STREAM_LIMIT
 from krewcli.agents.event_sink import (
     AGENT_REPLY,
     SESSION_END,
@@ -49,6 +49,9 @@ class ClaudeStreamAgent:
         sink = deps.event_sink
 
         try:
+            # limit= raises the asyncio StreamReader buffer from the
+            # 64 KB default so readline() can handle large stream-json
+            # objects (tool results with file contents, etc.).
             process = await asyncio.create_subprocess_exec(
                 *args,
                 cwd=deps.working_dir,
@@ -56,6 +59,7 @@ class ClaudeStreamAgent:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 start_new_session=True,
+                limit=_STREAM_LIMIT,
             )
         except FileNotFoundError:
             return AgentRunResult(output=TaskResult(

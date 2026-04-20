@@ -92,13 +92,13 @@ def test_claim_command_reports_blocked_task(monkeypatch):
                 blocked_reason="Missing dependency",
             )
 
-    monkeypatch.setattr("krewcli.cli.HeartbeatLoop", FakeHeartbeatLoop)
-    monkeypatch.setattr("krewcli.cli.TaskRunner", FakeTaskRunner)
+    monkeypatch.setattr("krewcli.cli.claim.HeartbeatLoop", FakeHeartbeatLoop)
+    monkeypatch.setattr("krewcli.cli.claim.TaskRunner", FakeTaskRunner)
     async def fake_load_recipe_context(client, recipe_id: str):
         assert recipe_id == "rec_1"
         return "git@github.com:test/repo.git", "main"
 
-    monkeypatch.setattr("krewcli.cli._load_recipe_context", fake_load_recipe_context)
+    monkeypatch.setattr("krewcli.cli.claim._load_recipe_context", fake_load_recipe_context)
 
     runner = CliRunner()
     result = runner.invoke(main, ["claim", "task_1", "--recipe", "rec_1"])

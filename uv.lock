@@ -207,6 +207,24 @@ wheels = [
 ]
 
 [[package]]
+name = "any-llm-sdk"
+version = "1.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "openresponses-types" },
+    { name = "pydantic" },
+    { name = "rich" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/4b/dea4eeeb5e4e3e55fa6b37a7ec033a18a2527aabf565bd598071d6308fbd/any_llm_sdk-1.13.0.tar.gz", hash = "sha256:967c5f4dd099f5f6cc9673f2888d5550f6e821d25341d31133a05741c1ce903e", size = 153753, upload-time = "2026-03-23T10:27:29.843Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/64/a1/0106667efdf870595981a0fc3e807675d1f8ded8dc8c20e936e6c42bcd95/any_llm_sdk-1.13.0-py3-none-any.whl", hash = "sha256:7e456a843cec249ae1cb3a498aa89df5baff8aa62d76a24718babb3b8a51e495", size = 216557, upload-time = "2026-03-23T10:27:28.306Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1807,10 +1825,12 @@ dependencies = [
     { name = "eth-abi" },
     { name = "eth-account" },
     { name = "httpx" },
+    { name = "krewwatch" },
     { name = "pydantic" },
     { name = "pydantic-ai" },
     { name = "pydantic-settings" },
     { name = "pyjwt" },
+    { name = "republic" },
     { name = "siwe" },
     { name = "uvicorn" },
     { name = "web3" },
@@ -1836,12 +1856,14 @@ requires-dist = [
     { name = "eth-abi", specifier = ">=5.0.0" },
     { name = "eth-account", specifier = ">=0.13.0" },
     { name = "httpx", specifier = ">=0.28.0" },
+    { name = "krewwatch", editable = "../krewwatch" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-ai", specifier = ">=0.2.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "pyjwt", specifier = ">=2.9.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
+    { name = "republic", specifier = ">=0.5.4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "siwe", specifier = ">=4.0.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
@@ -1851,6 +1873,26 @@ provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest-cov", specifier = ">=7.1.0" }]
+
+[[package]]
+name = "krewwatch"
+version = "0.1.0"
+source = { editable = "../krewwatch" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
+    { name = "starlette", marker = "extra == 'dev'", specifier = ">=0.27.0" },
+    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.34.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "logfire"
@@ -2098,6 +2140,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/02/2e/58d83848dd1a79cb92ed8e63f6ba901ca282c5f09d04af9423ec26c56fd7/openapi_pydantic-0.5.1.tar.gz", hash = "sha256:ff6835af6bde7a459fb93eb93bb92b8749b754fc6e51b2f1590a19dc3005ee0d", size = 60892, upload-time = "2025-01-08T19:29:27.083Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/12/cf/03675d8bd8ecbf4445504d8071adab19f5f993676795708e36402ab38263/openapi_pydantic-0.5.1-py3-none-any.whl", hash = "sha256:a3a09ef4586f5bd760a8df7f43028b60cafb6d9f61de2acba9574766255ab146", size = 96381, upload-time = "2025-01-08T19:29:25.275Z" },
+]
+
+[[package]]
+name = "openresponses-types"
+version = "2.3.0.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d9/26/b612c3215f5599714fa94d63eb5ee59b4eb66dbdeeaf86bb4d848359484d/openresponses_types-2.3.0.post1.tar.gz", hash = "sha256:11b8896d3621d2ac2439f6ff106f34ddcb1bbd517c317a6c852a9df2e98a0753", size = 19254, upload-time = "2026-01-22T20:02:03.933Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/5f/e16dad89ed24f586da5b01b9b206d3adbf21fe1af8e4dc55d5b93158fde6/openresponses_types-2.3.0.post1-py3-none-any.whl", hash = "sha256:88f6abcef9cad839203abff420dd080978bf6eb33cc06ddc5d78da4ccdba7613", size = 13847, upload-time = "2026-01-22T20:02:02.582Z" },
 ]
 
 [[package]]
@@ -3012,6 +3066,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/db/1a23f767fa250844772a9464306d34e0fafe2c317303b88a1415096b6324/regex-2026.3.32-cp314-cp314t-win32.whl", hash = "sha256:e480d3dac06c89bc2e0fd87524cc38c546ac8b4a38177650745e64acbbcfdeba", size = 275714, upload-time = "2026-03-28T21:49:14.528Z" },
     { url = "https://files.pythonhosted.org/packages/c2/2b/616d31b125ca76079d74d6b1d84ec0860ffdb41c379151135d06e35a8633/regex-2026.3.32-cp314-cp314t-win_amd64.whl", hash = "sha256:67015a8162d413af9e3309d9a24e385816666fbf09e48e3ec43342c8536f7df6", size = 285722, upload-time = "2026-03-28T21:49:16.642Z" },
     { url = "https://files.pythonhosted.org/packages/7e/91/043d9a00d6123c5fa22a3dc96b10445ce434a8110e1d5e53efb01f243c8b/regex-2026.3.32-cp314-cp314t-win_arm64.whl", hash = "sha256:1a6ac1ed758902e664e0d95c1ee5991aa6fb355423f378ed184c6ec47a1ec0e9", size = 275700, upload-time = "2026-03-28T21:49:19.348Z" },
+]
+
+[[package]]
+name = "republic"
+version = "0.5.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "any-llm-sdk" },
+    { name = "authlib" },
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4d/40/9ebd36e489696c0904df18bf4da6edc4b87f203b55f6942d3f782c69530c/republic-0.5.7.tar.gz", hash = "sha256:74cb0a02c3dffaa3438a8f41d19b137b7c8310a7d6c2c821b81cf98d5167200a", size = 155715, upload-time = "2026-03-27T06:59:32.557Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/33/26f4ad2665f96af4d02ae9c6f629e1d0c2538f22cecece3f8df6cd4c1da0/republic-0.5.7-py3-none-any.whl", hash = "sha256:702e2a3b662a91e68cc9c5b4893460dba01e02f081f309e6ce30d1e79c336db3", size = 62290, upload-time = "2026-03-27T06:59:33.458Z" },
 ]
 
 [[package]]

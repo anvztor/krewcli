@@ -260,9 +260,9 @@ class TestClaimCommand:
         async def _fake_load_recipe_context(client, recipe_id):
             return "git@example.com:repo.git", "main"
 
-        monkeypatch.setattr("krewcli.cli.HeartbeatLoop", _FakeHeartbeat)
-        monkeypatch.setattr("krewcli.cli.TaskRunner", _FakeRunner)
-        monkeypatch.setattr("krewcli.cli._load_recipe_context", _fake_load_recipe_context)
+        monkeypatch.setattr("krewcli.cli.claim.HeartbeatLoop", _FakeHeartbeat)
+        monkeypatch.setattr("krewcli.cli.claim.TaskRunner", _FakeRunner)
+        monkeypatch.setattr("krewcli.cli.claim._load_recipe_context", _fake_load_recipe_context)
         monkeypatch.setattr("krewcli.cli.KrewHubClient", lambda *a, **kw: _FakeClient())
         monkeypatch.setattr("krewcli.auth.token_store.load_token", lambda *a, **kw: None)
 
@@ -393,7 +393,7 @@ class TestStartLegacyCommand:
             captured["kwargs"] = kwargs
 
         # Replace the join callback so we can observe the dispatch.
-        monkeypatch.setattr("krewcli.cli.join.callback", _fake_join)
+        monkeypatch.setattr(main.commands["join"], "callback", _fake_join)
         monkeypatch.setattr("krewcli.cli.KrewHubClient", lambda *a, **kw: _FakeClient())
         monkeypatch.setattr("krewcli.auth.token_store.load_token", lambda *a, **kw: None)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from krewcli.agents.base import LocalCliAgent
+from krewcli.agents.local_cli import LocalCliAgent
 
 
 def create_bub_agent() -> LocalCliAgent:

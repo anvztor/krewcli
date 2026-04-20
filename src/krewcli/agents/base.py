@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 _MAX_LINE_CHARS = 2048
 # Default timeout applied when AgentDeps.harness is not set.
 _DEFAULT_LOCAL_TIMEOUT = 900
+# asyncio StreamReader buffer limit — the default 64 KB is too small
+# for CLI agents that output long single-line JSON (e.g. tool results).
+_STREAM_LIMIT = 4 * 1024 * 1024
 
 
 @dataclass
@@ -170,6 +173,7 @@ class LocalCliAgent:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                limit=_STREAM_LIMIT,
             )
         except FileNotFoundError:
             msg = f"{self._name} CLI is not installed"

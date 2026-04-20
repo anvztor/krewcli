@@ -12,7 +12,7 @@ import uvicorn
 
 from krewcli.agents.registry import AGENT_REGISTRY
 from krewcli.client.krewhub_client import KrewHubClient
-from krewcli.gateway import _get_owner_label, _make_agent_id
+from krewcli.gateway_helpers import _get_owner_label, _make_agent_id
 from krewcli.presence.heartbeat import HeartbeatLoop
 
 logger = logging.getLogger(__name__)

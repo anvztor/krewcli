@@ -18,6 +18,7 @@ dependencies = [
     "eth-abi>=5.0.0",
     "web3>=7.0.0",
     "republic>=0.5.4",
+    "krewwatch",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,9 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.uv.sources]
+krewwatch = { path = "../krewwatch", editable = true }
 
 [build-system]
 requires = ["hatchling"]

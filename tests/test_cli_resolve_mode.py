@@ -155,7 +155,7 @@ class TestOrchestratorBranch:
             skills=[SimpleNamespace(id="generate-graph")],
         )
 
-        monkeypatch.setattr("krewcli.cli.KrewHubClient", _FakeClient)
+        monkeypatch.setattr("krewcli.cli.join.KrewHubClient", _FakeClient)
         monkeypatch.setattr(
             "krewcli.a2a.executors.planner_agent.PlannerOrchestratorExecutor",
             _FakeExecutor,

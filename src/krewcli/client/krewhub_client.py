@@ -573,6 +573,25 @@ class KrewHubClient:
         resp.raise_for_status()
         return resp.json().get("cancelled", False)
 
+    async def add_task_to_bundle(
+        self,
+        bundle_id: str,
+        title: str,
+        description: str,
+        depends_on_task_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add a single task to an existing bundle."""
+        resp = await self._client.post(
+            f"/api/v1/bundles/{bundle_id}/tasks",
+            json={
+                "title": title,
+                "description": description,
+                "depends_on_task_ids": depends_on_task_ids or [],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["task"]
+
     async def get_working_tasks(
         self,
         agent_ids: list[str],

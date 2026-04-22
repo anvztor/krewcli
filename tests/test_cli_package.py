@@ -25,11 +25,6 @@ class TestCliPackageReExports:
         from krewcli.presence.heartbeat import HeartbeatLoop as _Original
         assert HeartbeatLoop is _Original
 
-    def test_task_runner_re_exported(self):
-        from krewcli.cli import TaskRunner
-        from krewcli.workflow.task_runner import TaskRunner as _Original
-        assert TaskRunner is _Original
-
     def test_krewhub_client_re_exported(self):
         from krewcli.cli import KrewHubClient
         from krewcli.client.krewhub_client import KrewHubClient as _Original

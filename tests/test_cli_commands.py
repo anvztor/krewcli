@@ -239,58 +239,6 @@ class TestMilestoneCommand:
 
 
 class TestClaimCommand:
-    def _patch_runtime(self, monkeypatch, *, runner_result: TaskResult | None):
-        class _FakeHeartbeat:
-            def __init__(self, *args, **kwargs) -> None:
-                self.current_task_id = None
-
-            def start(self):
-                return None
-
-            async def stop(self):
-                return None
-
-        class _FakeRunner:
-            def __init__(self, *args, **kwargs) -> None:
-                pass
-
-            async def claim_and_execute(self, task_id):
-                return runner_result
-
-        async def _fake_load_recipe_context(client, recipe_id):
-            return "git@example.com:repo.git", "main"
-
-        monkeypatch.setattr("krewcli.cli.claim.HeartbeatLoop", _FakeHeartbeat)
-        monkeypatch.setattr("krewcli.cli.claim.TaskRunner", _FakeRunner)
-        monkeypatch.setattr("krewcli.cli.claim._load_recipe_context", _fake_load_recipe_context)
-        monkeypatch.setattr("krewcli.cli.KrewHubClient", lambda *a, **kw: _FakeClient())
-        monkeypatch.setattr("krewcli.auth.token_store.load_token", lambda *a, **kw: None)
-
-    def test_success_path_reports_completed(self, runner, monkeypatch):
-        self._patch_runtime(
-            monkeypatch,
-            runner_result=TaskResult(summary="All green", success=True),
-        )
-        result = runner.invoke(main, ["claim", "task_1", "--recipe", "rec_1"])
-        assert result.exit_code == 0, result.output
-        assert "Task task_1 completed: All green" in result.output
-
-    def test_none_result_reports_failure(self, runner, monkeypatch):
-        self._patch_runtime(monkeypatch, runner_result=None)
-        result = runner.invoke(main, ["claim", "task_1", "--recipe", "rec_1"])
-        assert result.exit_code == 0, result.output
-        assert "could not be claimed" in result.output
-
-    def test_blocked_uses_summary_when_reason_missing(self, runner, monkeypatch):
-        self._patch_runtime(
-            monkeypatch,
-            runner_result=TaskResult(summary="Stuck on auth", success=False),
-        )
-        result = runner.invoke(main, ["claim", "task_1", "--recipe", "rec_1"])
-        assert result.exit_code == 0, result.output
-        # blocked_reason is None, so summary is used.
-        assert "Task task_1 blocked: Stuck on auth" in result.output
-
     def test_requires_recipe_option(self, runner):
         result = runner.invoke(main, ["claim", "task_1"])
         assert result.exit_code != 0

@@ -131,7 +131,7 @@ def register_wallet_commands(main: click.Group) -> None:
 
                     if result["status"] == "approved":
                         save_token(result["token"])
-                        from krewcli.gateway_helpers import _get_owner_label
+                        from krewcli.gateway.identity import _get_owner_label
                         _label = _get_owner_label()
                         click.echo(f"\n  Logged in as @{_label}")
                         click.echo(f"  Account: {result.get('account_id', 'unknown')}")

@@ -265,7 +265,7 @@ class KrewHubClient:
                 "actor_id": actor_id,
                 "actor_type": "agent",
                 "body": body,
-                "payload": payload,
+                "payload": payload or {},
                 "facts": facts or [],
                 "code_refs": code_refs or [],
             },
@@ -461,3 +461,142 @@ class KrewHubClient:
         )
         resp.raise_for_status()
         return resp.json()["runtime"]
+
+    # ────────────────────────────────────────────────────────────
+    # Daemon poll / session management (Managed Agents rewrite)
+    # ────────────────────────────────────────────────────────────
+
+    async def poll_claimable_tasks(
+        self,
+        recipe_id: str,
+    ) -> list[dict[str, Any]]:
+        """Poll for open tasks whose dependencies are met.
+
+        Returns tasks in ``open`` status from active bundles. The daemon
+        filters locally by agent capabilities before attempting to claim.
+        """
+        bundles = await self.list_bundles(recipe_id)
+        claimable: list[dict[str, Any]] = []
+        for bundle in bundles:
+            if bundle.get("status") not in ("open", "claimed"):
+                continue
+            detail = await self.get_bundle(bundle["id"])
+            done_ids = {
+                t["id"]
+                for t in detail.get("tasks", [])
+                if t.get("status") == "done"
+            }
+            for task in detail.get("tasks", []):
+                if task.get("status") != "open":
+                    continue
+                deps = set(task.get("depends_on_task_ids") or [])
+                if deps <= done_ids:
+                    claimable.append({
+                        **task,
+                        "bundle_id": bundle["id"],
+                        "bundle_prompt": bundle.get("prompt", ""),
+                        "recipe_id": recipe_id,
+                    })
+        return claimable
+
+    async def post_task_completion(
+        self,
+        task_id: str,
+        session_id: str,
+        work_dir: str,
+        artifacts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Pin session_id + work_dir on the task row for crash recovery."""
+        resp = await self._client.post(
+            f"/api/v1/tasks/{task_id}/completion",
+            json={
+                "session_id": session_id,
+                "work_dir": work_dir,
+                "artifacts": artifacts or [],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["task"]
+
+    async def post_task_progress(
+        self,
+        task_id: str,
+        summary: str,
+        step: int | None = None,
+        total: int | None = None,
+    ) -> dict[str, Any]:
+        """Report ephemeral progress for a running task."""
+        payload: dict[str, Any] = {"summary": summary}
+        if step is not None:
+            payload["step"] = step
+        if total is not None:
+            payload["total"] = total
+        resp = await self._client.post(
+            f"/api/v1/tasks/{task_id}/progress",
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def post_task_usage(
+        self,
+        task_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        model: str | None = None,
+        cost_usd: float | None = None,
+        duration_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Record LLM token usage for a completed task."""
+        payload: dict[str, Any] = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+        if model is not None:
+            payload["model"] = model
+        if cost_usd is not None:
+            payload["cost_usd"] = cost_usd
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        resp = await self._client.post(
+            f"/api/v1/tasks/{task_id}/usage",
+            json=payload,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def poll_cancel_status(self, task_id: str) -> bool:
+        """Check if a task has been cancelled. Returns True if cancelled."""
+        resp = await self._client.get(
+            f"/api/v1/tasks/{task_id}/cancel-status",
+        )
+        resp.raise_for_status()
+        return resp.json().get("cancelled", False)
+
+    async def get_working_tasks(
+        self,
+        agent_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Find tasks in 'working' state claimed by given agent IDs.
+
+        Used by orphan recovery to find stuck tasks from a prior crash.
+        """
+        working: list[dict[str, Any]] = []
+        for agent_id in agent_ids:
+            resp = await self._client.get(
+                "/api/v1/agents",
+                params={"agent_id": agent_id},
+            )
+            if resp.status_code != 200:
+                continue
+            presence = resp.json().get("agents", [])
+            for p in presence:
+                tid = p.get("current_task_id")
+                if tid:
+                    try:
+                        task = await self.get_task(tid)
+                        if task.get("status") == "working":
+                            working.append(task)
+                    except Exception:
+                        pass
+        return working

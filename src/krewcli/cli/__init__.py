@@ -13,7 +13,7 @@ import httpx
 
 from krewcli.client.krewhub_client import KrewHubClient
 from krewcli.config import get_settings
-from krewcli.gateway_helpers import _gateway_agent_metadata
+from krewcli.gateway.identity import _gateway_agent_metadata
 
 # ── Shared CLI group with friendly error handling ──
 
@@ -81,8 +81,9 @@ def main(ctx: click.Context) -> None:
 
 from krewcli.cli.join import register_join_commands, _resolve_mode, _default_model, _run_agent, _run_gateway  # noqa: E402
 from krewcli.cli.claim import register_claim_commands, _load_recipe_context  # noqa: E402
-from krewcli.cli.tasks import register_task_commands, _run_task_worker, _run_task_worker_once  # noqa: E402  # noqa: F811
+from krewcli.cli.tasks import register_task_commands, _run_task_worker, _run_task_worker_once  # noqa: E402
 from krewcli.cli.gateway_cmds import register_gateway_commands  # noqa: E402
+from krewcli.cli.daemon import register_daemon_commands  # noqa: E402
 from krewcli.cli_onboard import register_onboard_command  # noqa: E402
 from krewcli.cli_wallet import register_wallet_commands  # noqa: E402
 
@@ -90,11 +91,11 @@ register_join_commands(main)
 register_claim_commands(main)
 register_task_commands(main)
 register_gateway_commands(main)
+register_daemon_commands(main)
 register_onboard_command(main)
 register_wallet_commands(main)
 
 from krewcli.presence.heartbeat import HeartbeatLoop  # noqa: E402, F401
-from krewcli.workflow.task_runner import TaskRunner  # noqa: E402, F401
 
 
 def _attach_compat_attrs(command: click.Command, **attrs: object) -> click.Command:
@@ -103,7 +104,7 @@ def _attach_compat_attrs(command: click.Command, **attrs: object) -> click.Comma
     return command
 
 
-# Keep the package surface aligned with the original single-file module.
+# Backward-compat surface for tests that poke at cli.join, cli.claim, etc.
 join = _attach_compat_attrs(
     main.commands["join"],
     _resolve_mode=_resolve_mode,
@@ -119,7 +120,6 @@ claim = _attach_compat_attrs(
     main.commands["claim"],
     _load_recipe_context=_load_recipe_context,
     HeartbeatLoop=HeartbeatLoop,
-    TaskRunner=TaskRunner,
     os=os,
 )
 list_tasks = main.commands["list-tasks"]
@@ -146,7 +146,6 @@ __all__ = [
     "_run_task_worker_once",
     "_gateway_agent_metadata",
     "HeartbeatLoop",
-    "TaskRunner",
     "KrewHubClient",
     "get_settings",
     "os",

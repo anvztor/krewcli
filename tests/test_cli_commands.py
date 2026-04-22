@@ -404,8 +404,6 @@ class TestStartLegacyCommand:
                 "--recipe", "rec_1",
                 "--cookbook", "cb_1",
                 "--agent", "claude",
-                "--agent-id", "id_1",
-                "--port", "9100",
                 "--workdir", "/tmp/work",
             ],
         )
@@ -415,8 +413,6 @@ class TestStartLegacyCommand:
         assert kwargs["recipe"] == "rec_1"
         assert kwargs["cookbook"] == "cb_1"
         assert kwargs["agent"] == "claude"
-        assert kwargs["agent_id"] == "id_1"
-        assert kwargs["port"] == 9100
         assert kwargs["workdir"] == "/tmp/work"
 
 

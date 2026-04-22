@@ -26,3 +26,12 @@ class TaskResult(BaseModel):
     code_refs: list[CodeRefResult] = Field(default_factory=list, description="Code references")
     success: bool = Field(default=True, description="Whether the task succeeded")
     blocked_reason: str | None = Field(default=None, description="Reason if blocked")
+
+
+from dataclasses import dataclass  # noqa: E402
+
+
+@dataclass
+class AgentRunResult:
+    """Wrapper for agent execution output."""
+    output: TaskResult

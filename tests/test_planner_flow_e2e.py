@@ -45,6 +45,11 @@ from krewcli.client.krewhub_client import KrewHubClient
 
 KREWHUB_PROJECT_PATH = Path(__file__).resolve().parents[2] / "krewhub"
 KREWHUB_BIN_PATH = KREWHUB_PROJECT_PATH / ".venv" / "bin" / "krewhub"
+# API-key auth in live krewhub registers agent ownership under this synthetic
+# account id, and the A2A gateway only considers `name@owner` presences online.
+LEGACY_API_KEY_OWNER = "acc_legacy_apikey"
+FAKE_PLANNER_AGENT_ID = f"fake-planner@{LEGACY_API_KEY_OWNER}"
+FAKE_WORKER_AGENT_ID = f"fake-worker@{LEGACY_API_KEY_OWNER}"
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +97,16 @@ def _get_free_port() -> int:
             pytest.skip(f"local socket bind not permitted: {exc}")
         sock.listen(1)
         return int(sock.getsockname()[1])
+
+
+def _get_required_hub_port(port: int = 8420) -> int:
+    """Planner E2E must match krewhub's current hardcoded local A2A hub port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError as exc:
+            pytest.skip(f"planner e2e requires local port {port}: {exc}")
+    return port
 
 
 def _krewhub_command() -> list[str]:
@@ -213,7 +228,7 @@ def _build_fake_worker_app(krewhub_base_url: str, api_key: str) -> Starlette:
                         "/api/v1/a2a/callback",
                         json={
                             "task_id": task_id,
-                            "agent_id": "fake-worker",
+                            "agent_id": FAKE_WORKER_AGENT_ID,
                             "success": True,
                             "summary": "completed by fake worker",
                         },
@@ -241,7 +256,7 @@ def _build_fake_worker_app(krewhub_base_url: str, api_key: str) -> Starlette:
 @pytest.mark.asyncio
 async def test_planner_flow_e2e_empty_bundle_to_cooked(tmp_path):
     """Empty bundle → planner dispatch → graph runner → COOKED, no manual exec."""
-    krewhub_port = _get_free_port()
+    krewhub_port = _get_required_hub_port()
     planner_port = _get_free_port()
     worker_port = _get_free_port()
     api_key = "e2e-planner-key"
@@ -308,7 +323,7 @@ async def test_planner_flow_e2e_empty_bundle_to_cooked(tmp_path):
             #    picks it up. Worker advertises 'coder' to match the graph's
             #    task_kind, so dispatch_cycle picks it for each step.
             await hub_client.register_agent(
-                agent_id="fake-planner",
+                agent_id=FAKE_PLANNER_AGENT_ID,
                 cookbook_id=cookbook_id,
                 display_name="Fake Planner",
                 capabilities=["generate-graph"],
@@ -316,7 +331,7 @@ async def test_planner_flow_e2e_empty_bundle_to_cooked(tmp_path):
                 endpoint_url=planner_url,
             )
             await hub_client.register_agent(
-                agent_id="fake-worker",
+                agent_id=FAKE_WORKER_AGENT_ID,
                 cookbook_id=cookbook_id,
                 display_name="Fake Worker",
                 capabilities=["coder"],

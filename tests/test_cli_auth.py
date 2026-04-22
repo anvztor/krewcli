@@ -119,7 +119,7 @@ class TestLoginCommand:
         with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
              patch("time.sleep"), \
              patch("webbrowser.open"), \
-             patch("krewcli.gateway_helpers._get_owner_label", return_value="local"), \
+             patch("krewcli.gateway.identity._get_owner_label", return_value="local"), \
              patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
             result = runner.invoke(main, ["login"])
 

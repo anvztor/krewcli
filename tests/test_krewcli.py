@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from click.testing import CliRunner
 import httpx
@@ -228,6 +230,35 @@ async def test_krewhub_client_post_decision():
         "bundle_id": "bun_1",
         "decision": "approved",
     }
+
+
+@pytest.mark.asyncio
+async def test_krewhub_client_post_event_uses_empty_payload_by_default():
+    client = KrewHubClient("http://127.0.0.1:8420", "test-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/tasks/task_1/events"
+        assert request.method == "POST"
+        assert json.loads(request.content.decode())["payload"] == {}
+        return httpx.Response(200, json={"event": {"id": "evt_1"}})
+
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://127.0.0.1:8420",
+        headers={"X-API-Key": "test-key"},
+    )
+
+    try:
+        event = await client.post_event(
+            task_id="task_1",
+            event_type="milestone",
+            actor_id="agent_1",
+            body="Done",
+        )
+    finally:
+        await client.close()
+
+    assert event == {"id": "evt_1"}
 
 
 @pytest.mark.asyncio

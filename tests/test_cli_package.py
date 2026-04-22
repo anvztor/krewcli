@@ -82,7 +82,7 @@ class TestCliPackageReExports:
 
     def test_gateway_agent_metadata_re_exported(self):
         from krewcli.cli import _gateway_agent_metadata
-        from krewcli.gateway_helpers import _gateway_agent_metadata as _Original
+        from krewcli.gateway.identity import _gateway_agent_metadata as _Original
         assert _gateway_agent_metadata is _Original
 
 

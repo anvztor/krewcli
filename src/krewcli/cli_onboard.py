@@ -1,4 +1,4 @@
-"""Onboard CLI command — extracted from cli.py."""
+"""Onboard CLI command — interactive cookbook setup + daemon launch."""
 
 from __future__ import annotations
 
@@ -8,12 +8,9 @@ import os
 from pathlib import Path
 
 import click
-import uvicorn
 
 from krewcli.agents.registry import AGENT_REGISTRY
 from krewcli.client.krewhub_client import KrewHubClient
-from krewcli.gateway_helpers import _get_owner_label, _make_agent_id
-from krewcli.presence.heartbeat import HeartbeatLoop
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +22,12 @@ def register_onboard_command(main: click.Group) -> None:
     @click.option("--cookbook", default=None, help="Cookbook ID (skips creation)")
     @click.option("--cookbook-name", default="my-cookbook", help="Name for new cookbook")
     @click.option("--owner", default="cli_user", help="Owner ID for cookbook creation")
-    @click.option("--port", default=9999, type=int, help="A2A gateway port")
     @click.option("--workdir", default=None, help="Root working directory (default: ~/krew)")
     @click.option("--agents", default=None, help="Comma-separated agent types (skip selection)")
     @click.option("--max-concurrent", default=1, type=int, help="Max concurrent tasks per agent")
     @click.pass_context
-    def onboard(ctx, cookbook, cookbook_name, owner, port, workdir, agents, max_concurrent):
-        """Interactive onboarding — select recipes, agents, and launch gateway.
+    def onboard(ctx, cookbook, cookbook_name, owner, workdir, agents, max_concurrent):
+        """Interactive onboarding — select recipes, agents, and launch daemon.
 
         \\b
         Steps:
@@ -39,7 +35,7 @@ def register_onboard_command(main: click.Group) -> None:
           2. Clone cookbook repo, select recipes (added as git submodules)
           3. Push submodules back (krewhub auto-indexes)
           4. Detect and select local agents
-          5. Launch A2A gateway with per-recipe working directories
+          5. Launch daemon for task polling
 
         \\b
         Examples:
@@ -47,12 +43,8 @@ def register_onboard_command(main: click.Group) -> None:
           krewcli onboard --cookbook-name my-project --owner drej
           krewcli onboard --cookbook CB_ID --agents claude,codex
         """
-        import shutil
-
         settings = ctx.obj["settings"]
-        settings = settings.model_copy(update={"agent_port": port})
         resolved_workdir = workdir or os.path.join(Path.home(), "krew")
-
         agent_names = agents.split(",") if agents else None
 
         asyncio.run(_run_onboard(
@@ -75,10 +67,10 @@ async def _run_onboard(
     agent_names,
     max_concurrent,
 ):
-    """Interactive onboarding: clone cookbook, select recipes + agents, launch gateway."""
+    """Interactive onboarding: clone cookbook, select recipes + agents, launch daemon."""
     import shutil
 
-    from krewcli.a2a.gateway_server import create_gateway_app
+    from krewcli.backend.registry import resolve_backends
     from krewcli.cookbook_repo import (
         sanitize_name,
         add_recipe_submodule,
@@ -87,6 +79,7 @@ async def _run_onboard(
         configure_git_user,
         sync_submodules,
     )
+    from krewcli.daemon.loop import DaemonLoop
     from krewcli.interactive import prompt_multi_select, prompt_single_select
 
     from krewcli.auth.token_store import load_token as _lt
@@ -94,7 +87,6 @@ async def _run_onboard(
         settings.krewhub_url, settings.api_key,
         jwt_token=_lt(), verify_ssl=settings.verify_ssl,
     )
-    callback_url = f"{settings.krewhub_url}/api/v1/a2a/callback"
 
     try:
         # 1. Create or reuse cookbook
@@ -125,10 +117,9 @@ async def _run_onboard(
         cookbook_detail = await client.get_cookbook(cookbook_id)
         recipes = cookbook_detail.get("recipes", [])
 
+        recipe_id = ""
         if not recipes:
             click.echo("\nNo recipes in this cookbook yet. Add recipes via krewhub first.")
-            click.echo("Gateway will start, but no recipe-specific routing available.")
-            recipe_contexts: dict[str, dict] = {}
         else:
             # 4. Interactive recipe selection
             recipe_items = [
@@ -137,7 +128,6 @@ async def _run_onboard(
             ]
             selected_indices = prompt_multi_select("Recipes", recipe_items)
             selected_recipes = [recipes[i] for i in selected_indices]
-
             click.echo(f"\nSelected {len(selected_recipes)} recipe(s)")
 
             # 5. Add selected recipes as submodules
@@ -172,16 +162,9 @@ async def _run_onboard(
             await sync_submodules(cookbook_dir)
             click.echo("  Submodules synced")
 
-            # Build recipe_contexts
-            recipe_contexts = {}
-            for recipe in selected_recipes:
-                name = recipe.get("name", recipe["id"])
-                safe_name = sanitize_name(name)
-                recipe_contexts[name] = {
-                    "working_dir": os.path.join(cookbook_dir, safe_name),
-                    "repo_url": recipe.get("repo_url", ""),
-                    "branch": recipe.get("default_branch", "main"),
-                }
+            # Use first selected recipe for daemon
+            if selected_recipes:
+                recipe_id = selected_recipes[0]["id"]
 
         # 8. Detect and select agents
         available_agents = [
@@ -199,104 +182,39 @@ async def _run_onboard(
             selected_agent_indices = prompt_multi_select("Agents", available_agents)
             resolved_agent_names = [available_agents[i][1] for i in selected_agent_indices]
 
-        # 9. Create gateway app
-        app, spawn_manager, registered_agents = create_gateway_app(
-            host=settings.agent_host,
-            port=settings.agent_port,
-            working_dir=cookbook_dir if recipe_contexts else working_dir,
-            repo_url="",
-            branch="main",
-            callback_url=callback_url,
-            api_key=settings.api_key,
-            agent_names=resolved_agent_names,
-            max_concurrent=max_concurrent,
-            recipe_contexts=recipe_contexts,
-            krewhub_client=client,
-        )
-
-        click.echo(f"\nGateway agents: {', '.join(registered_agents)}")
-        for name in registered_agents:
-            click.echo(f"  /agents/{name} -> {name} CLI")
-
-        # 10. Register agents and start heartbeats
-        heartbeats: list[HeartbeatLoop] = []
-        _owner_label = _get_owner_label()
-        for name in registered_agents:
-            agent_id = _make_agent_id(name, _owner_label)
-            endpoint_url = f"http://{settings.agent_host}:{settings.agent_port}/agents/{name}"
-
-            entry = AGENT_REGISTRY.get(name, {})
-            display_name = entry.get("display_name", name)
-            capabilities = entry.get("capabilities", [])
-
-            try:
-                await client.register_agent(
-                    agent_id=agent_id,
-                    cookbook_id=cookbook_id,
-                    display_name=display_name,
-                    capabilities=capabilities,
-                    max_concurrent_tasks=max_concurrent,
-                    endpoint_url=endpoint_url,
-                )
-                click.echo(f"  Registered {display_name} ({agent_id})")
-            except Exception:
-                logger.warning("Registration failed for %s, continuing", name)
-
-            hb = HeartbeatLoop(
-                client=client,
-                agent_id=agent_id,
-                cookbook_id=cookbook_id,
-                display_name=display_name,
-                capabilities=capabilities,
-                interval=settings.heartbeat_interval,
-                endpoint_url=endpoint_url,
-            )
-            hb.start()
-            heartbeats.append(hb)
+        # 9. Resolve backends
+        backends = resolve_backends(resolved_agent_names)
+        if not backends:
+            click.echo("No backends available.")
+            raise SystemExit(1)
 
         click.echo(f"\nOnboarding complete:")
         click.echo(f"  Cookbook: {cookbook_id}")
-        click.echo(f"  Workspace: {cookbook_dir if recipe_contexts else working_dir}")
-        if recipe_contexts:
-            click.echo(f"  Recipes: {', '.join(recipe_contexts.keys())}")
-        click.echo(f"  Agents: {', '.join(registered_agents)}")
-        click.echo(f"  Gateway: http://{settings.agent_host}:{settings.agent_port}")
+        click.echo(f"  Workspace: {cookbook_dir}")
+        click.echo(f"  Agents: {', '.join(backends.keys())}")
         click.echo(f"  KrewHub: {settings.krewhub_url}")
-        click.echo(f"\nGateway ready. Waiting for tasks. Press Ctrl+C to stop.")
 
-        # 11. Serve
-        config = uvicorn.Config(
-            app, host=settings.agent_host, port=settings.agent_port, log_level="info",
+        if not recipe_id:
+            click.echo("\nNo recipe selected. Daemon cannot start without a recipe.")
+            raise SystemExit(1)
+
+        click.echo(f"\nDaemon starting for recipe {recipe_id}. Press Ctrl+C to stop.")
+
+        # 10. Launch daemon loop
+        daemon = DaemonLoop(
+            client=client,
+            backends=backends,
+            cookbook_id=cookbook_id,
+            recipe_id=recipe_id,
+            working_dir=cookbook_dir,
+            max_concurrent=max_concurrent,
         )
-        server = uvicorn.Server(config)
-
-        loop = asyncio.get_running_loop()
-        _orig_handler = loop.get_exception_handler()
-
-        def _shutdown_exception_handler(loop, context):
-            exc = context.get("exception")
-            if isinstance(exc, (asyncio.InvalidStateError, OSError, BrokenPipeError)):
-                return
-            if _orig_handler:
-                _orig_handler(loop, context)
-            else:
-                loop.default_exception_handler(context)
 
         try:
-            await server.serve()
+            await daemon.run()
         finally:
-            loop.set_exception_handler(_shutdown_exception_handler)
-            await spawn_manager.shutdown()
-            for hb in heartbeats:
-                try:
-                    await hb.stop()
-                except (asyncio.CancelledError, asyncio.InvalidStateError, OSError):
-                    pass
-            try:
-                await client.close()
-            except (asyncio.CancelledError, asyncio.InvalidStateError, OSError):
-                pass
-            click.echo("Gateway stopped. Goodbye.")
+            await client.close()
+            click.echo("Daemon stopped. Goodbye.")
 
     except Exception as exc:
         try:

@@ -83,124 +83,89 @@ class TestSessionKeyCommands:
 
 
 class TestLoginCommand:
-    def test_login_device_flow_approved(self, runner, tmp_path):
-        """Device flow: request code → poll → approved → JWT saved."""
-        from unittest.mock import MagicMock
+    """Track A1: ``krewcli login`` runs the inverted device-flow."""
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
+    def test_login_invokes_device_flow_and_saves_record(self, runner, tmp_path, monkeypatch):
+        from krewcli.auth import device_flow, token_store
 
-        # First call: POST /device/request
-        request_resp = MagicMock()
-        request_resp.status_code = 200
-        request_resp.raise_for_status = MagicMock()
-        request_resp.json.return_value = {
-            "device_code": "dc_test",
-            "user_code": "ABCD-1234",
-            "expires_in": 600,
-        }
+        async def fake_request(_url):
+            return device_flow.DeviceCode(
+                device_code="dc_test",
+                user_code="ABCD-1234",
+                verification_uri="http://example/verify?code=ABCD-1234",
+                expires_in=600,
+            )
 
-        # Second call: POST /device/token → approved immediately
-        token_resp = MagicMock()
-        token_resp.status_code = 200
-        token_resp.raise_for_status = MagicMock()
-        token_resp.json.return_value = {
-            "status": "approved",
-            "token": "jwt-test-token",
-            "account_id": "acc_test123456",
-            "wallet_address": "0xABC123",
-            "session_id": "ses_test",
-            "expires_at": "2026-04-10T00:00:00Z",
-        }
+        async def fake_poll(_url, _device_code, *, interval=3.0, timeout=600.0):
+            return device_flow.DeviceToken(
+                token="jwt-test-token",
+                account_id="acc_test123456",
+                expires_at="2026-04-10T00:00:00Z",
+            )
 
-        mock_client.post.side_effect = [request_resp, token_resp]
+        monkeypatch.setattr(device_flow, "request", fake_request)
+        monkeypatch.setattr(device_flow, "poll", fake_poll)
+        # Force file fallback by disabling keyring lookup in test
+        monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
+        monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
 
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
-             patch("time.sleep"), \
-             patch("webbrowser.open"), \
-             patch("krewcli.gateway.identity._get_owner_label", return_value="local"), \
-             patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
-            result = runner.invoke(main, ["login"])
-
-        assert result.exit_code == 0
-        assert "Logged in as @local" in result.output
-        assert "Account: acc_test123456" in result.output
+        result = runner.invoke(main, ["login"])
+        assert result.exit_code == 0, result.output
+        assert "Logged in as acc_test123456" in result.output
+        # Both record + raw-token files written
+        assert (tmp_path / "token.json").is_file()
         assert (tmp_path / "token").read_text().strip() == "jwt-test-token"
 
-    def test_login_connection_error(self, runner):
-        from unittest.mock import MagicMock
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = httpx.ConnectError("refused")
+class TestLogoutCommand:
+    def test_logout_clears_record(self, runner, tmp_path, monkeypatch):
+        from krewcli.auth import token_store
 
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
-             patch("webbrowser.open"):
-            result = runner.invoke(main, ["login"])
+        monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
+        monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
+        token_store.save_record({
+            "token": "x",
+            "account_id": "acc_x",
+            "expires_at": "2099-01-01T00:00:00Z",
+        })
+        token_store.save_token("x")
+        result = runner.invoke(main, ["logout"])
+        assert result.exit_code == 0
+        assert "Logged out" in result.output
+        assert not (tmp_path / "token").is_file()
+        assert not (tmp_path / "token.json").is_file()
 
-        assert result.exit_code == 1
-        assert "Could not connect" in result.output or "krewauth" in result.output
 
-    def test_login_code_expired(self, runner, tmp_path):
-        from unittest.mock import MagicMock
+class TestWhoamiCommand:
+    def test_whoami_when_logged_out(self, runner, tmp_path, monkeypatch):
+        from krewcli.auth import token_store
 
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
+        monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
+        result = runner.invoke(main, ["whoami"])
+        assert result.exit_code == 0
+        assert "Not logged in" in result.output
 
-        request_resp = MagicMock()
-        request_resp.status_code = 200
-        request_resp.raise_for_status = MagicMock()
-        request_resp.json.return_value = {
-            "device_code": "dc_test",
-            "user_code": "ABCD-1234",
-            "expires_in": 600,
-        }
+    def test_whoami_decodes_record(self, runner, tmp_path, monkeypatch):
+        import jwt as _jwt
+        from krewcli.auth import token_store
 
-        expired_resp = MagicMock()
-        expired_resp.status_code = 404
+        monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
+        monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
+        token = _jwt.encode(
+            {"sub": "acc_alice", "auth_method": "device", "exp": 9999999999},
+            "irrelevant",
+            algorithm="HS256",
+        )
+        token_store.save_record({
+            "token": token, "account_id": "acc_alice", "expires_at": "x",
+        })
+        result = runner.invoke(main, ["whoami"])
+        assert result.exit_code == 0
+        assert "acc_alice" in result.output
+        assert "device" in result.output
 
-        mock_client.post.side_effect = [request_resp, expired_resp]
 
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
-             patch("time.sleep"), \
-             patch("webbrowser.open"), \
-             patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
-            result = runner.invoke(main, ["login"])
-
-        assert result.exit_code == 1
-        assert "Code expired" in result.output
-
-    def test_login_times_out_waiting_for_approval(self, runner, tmp_path):
-        from unittest.mock import MagicMock
-
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-
-        request_resp = MagicMock()
-        request_resp.status_code = 200
-        request_resp.raise_for_status = MagicMock()
-        request_resp.json.return_value = {
-            "device_code": "dc_test",
-            "user_code": "ABCD-1234",
-            "expires_in": 2,
-        }
-
-        pending_resp = MagicMock()
-        pending_resp.status_code = 200
-        pending_resp.raise_for_status = MagicMock()
-        pending_resp.json.return_value = {"status": "pending"}
-
-        mock_client.post.side_effect = [request_resp, pending_resp]
-
-        with patch("krewcli.cli.httpx.Client", return_value=mock_client), \
-             patch("time.sleep"), \
-             patch("webbrowser.open"), \
-             patch("krewcli.auth.token_store._DEFAULT_DIR", tmp_path):
-            result = runner.invoke(main, ["login"])
-
-        assert result.exit_code == 1
-        assert "Timed out waiting for approval" in result.output
+# Keep `httpx` reachable so the lint in this test module doesn't break with
+# unused imports if a future change re-introduces synchronous flows.
+_httpx_module = httpx

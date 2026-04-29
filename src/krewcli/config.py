@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     krewhub_url: str = "http://127.0.0.1:8420"
     krew_auth_url: str = "http://127.0.0.1:8421"
+    # Track A1 alias mirroring spec naming (krewauth_url == krew_auth_url)
+    krewauth_url: str = "http://127.0.0.1:8421"
     api_key: str = "dev-api-key"
     agent_port: int = 9999
     agent_host: str = "127.0.0.1"

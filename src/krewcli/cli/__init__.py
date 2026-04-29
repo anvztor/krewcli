@@ -84,6 +84,9 @@ from krewcli.cli.claim import register_claim_commands, _load_recipe_context  # n
 from krewcli.cli.tasks import register_task_commands, _run_task_worker, _run_task_worker_once  # noqa: E402
 from krewcli.cli.gateway_cmds import register_gateway_commands  # noqa: E402
 from krewcli.cli.daemon import register_daemon_commands  # noqa: E402
+from krewcli.cli.login import register as register_login  # noqa: E402
+from krewcli.cli.logout import register as register_logout  # noqa: E402
+from krewcli.cli.whoami import register as register_whoami  # noqa: E402
 from krewcli.cli_onboard import register_onboard_command  # noqa: E402
 from krewcli.cli_wallet import register_wallet_commands  # noqa: E402
 
@@ -92,6 +95,9 @@ register_claim_commands(main)
 register_task_commands(main)
 register_gateway_commands(main)
 register_daemon_commands(main)
+register_login(main)
+register_logout(main)
+register_whoami(main)
 register_onboard_command(main)
 register_wallet_commands(main)
 

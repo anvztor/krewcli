@@ -36,14 +36,23 @@ class ExecutionEnvironment:
         bundle_id: str,
         repo_url: str = "",
         branch: str = "",
+        sandbox_id: str | None = None,
     ) -> None:
         self._base_dir = base_dir
         self._task_id = task_id
         self._bundle_id = bundle_id
         self._repo_url = repo_url
         self._branch = branch
+        # Auth track A2 — when set, the harness emits sandbox.attached
+        # and (eventually) routes execution into the e2b sandbox via
+        # the e2b SDK. For now this is a metadata pass-through.
+        self._sandbox_id = sandbox_id
         self._worktree_path: str | None = None
         self._worktree_mgr: WorktreeManager | None = None
+
+    @property
+    def sandbox_id(self) -> str | None:
+        return self._sandbox_id
 
     @property
     def working_dir(self) -> str:

@@ -1276,6 +1276,7 @@ dev = [
 dev = [
     { name = "email-validator" },
     { name = "fastapi" },
+    { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "sse-starlette" },
 ]
@@ -1305,6 +1306,7 @@ provides-extras = ["dev"]
 dev = [
     { name = "email-validator", specifier = ">=2.3.0" },
     { name = "fastapi", specifier = ">=0.136.1" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "sse-starlette", specifier = ">=3.4.1" },
 ]

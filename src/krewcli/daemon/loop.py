@@ -101,6 +101,16 @@ class DaemonLoop:
         click.echo(f"  Recipe: {self._recipe_id}")
         click.echo(f"  Max concurrent: {self._max_concurrent}")
 
+        # Track A1: krewhub requires a Bearer JWT minted by krewauth.
+        # Surface a clear hint up front when no token is on disk.
+        if load_token() is None:
+            click.echo(
+                "  WARNING: no krewauth token found at ~/.krewcli/token. "
+                "Run `krewcli login` first; krewhub will reject all "
+                "unauthenticated calls with 401.",
+                err=True,
+            )
+
         # Build agent IDs
         for name in self._backends:
             self._agent_ids[name] = _make_agent_id(name, self._owner)

@@ -1,15 +1,29 @@
+"""Lightweight HS256 helpers retained for legacy local tokens.
+
+The canonical IdP is krewauth; these helpers exist for local-only
+flows (e.g., daemon's local server) and unit tests. They do NOT verify
+ES256 JWTs from krewauth — daemon code should accept the raw token
+returned by ``krewcli login`` and forward it as a Bearer header.
+"""
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import jwt
 
-from krewcli.auth.models import TokenPayload
-
 
 class TokenError(Exception):
     """Raised when token creation or validation fails."""
+
+
+@dataclass(frozen=True)
+class TokenPayload:
+    user_id: str
+    exp: float
+    iat: float
+    extra_claims: tuple[tuple[str, Any], ...] = ()
 
 
 def create_access_token(

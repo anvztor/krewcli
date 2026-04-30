@@ -79,6 +79,29 @@ class Harness:
             prompt=prompt,
         )
 
+        # Auth track A2 — when the task is bound to an e2b sandbox,
+        # signal the attachment so cookrew-beta's task-live-card can
+        # update its status to running. Real e2b SDK execution will
+        # land in a follow-up; for now this is a metadata-only beacon.
+        # We use getattr so legacy ExecutionEnvironment fakes in tests
+        # without sandbox_id continue to work.
+        sandbox_id = getattr(execenv, "sandbox_id", None)
+        if sandbox_id:
+            try:
+                await session.append(
+                    "milestone",
+                    body=f"Attached to sandbox {sandbox_id}",
+                    payload={
+                        "kind": "sandbox.attached",
+                        "sandbox_id": sandbox_id,
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "harness: failed to emit sandbox.attached for task %s",
+                    task_id,
+                )
+
         # 2. Pre-execution sandbox validation
         env_overlay = execenv.build_env(recipe_id=recipe_id)
         pre_check = self._validator.validate_pre_execution(

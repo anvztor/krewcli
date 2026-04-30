@@ -18,6 +18,10 @@ dependencies = [
     "republic>=0.5.4",
     "krewwatch",
 ]
+# Auth track A2 (TODO): add e2b SDK once sandbox-attach lands. The
+# self-hosted orchestrator at http://10.20.100.214:3000 currently
+# accepts plain HTTP; the SDK can be invoked via direct httpx for
+# initial wiring. Track follow-up in the auth journey plan.
 
 [project.optional-dependencies]
 dev = [
@@ -46,5 +50,8 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "email-validator>=2.3.0",
+    "fastapi>=0.136.1",
     "pytest-cov>=7.1.0",
+    "sse-starlette>=3.4.1",
 ]

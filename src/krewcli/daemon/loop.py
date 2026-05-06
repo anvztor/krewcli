@@ -26,7 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import platform
+import socket
+from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import click
 
@@ -43,6 +48,34 @@ if TYPE_CHECKING:
     from krewcli.client.krewhub_client import KrewHubClient
 
 logger = logging.getLogger(__name__)
+
+
+def _device_id() -> str:
+    """Return a stable per-device id for daemon runtime de-duplication."""
+    path = Path.home() / ".krewcli" / "device-id"
+    try:
+        if path.is_file():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = f"dev_{uuid4().hex[:16]}"
+        path.write_text(value, encoding="utf-8")
+        os.chmod(path, 0o600)
+        return value
+    except OSError:
+        return f"host_{socket.gethostname() or platform.node() or 'unknown'}"
+
+
+def _host_info(endpoint_url: str) -> dict[str, object]:
+    return {
+        "device_id": _device_id(),
+        "hostname": socket.gethostname() or platform.node(),
+        "platform": platform.platform(),
+        "pid": os.getpid(),
+        "runtime": "krewcli-daemon",
+        "endpoint_url": endpoint_url,
+    }
 
 
 class DaemonLoop:
@@ -469,7 +502,7 @@ class DaemonLoop:
                     account_id=account_id,
                     daemon_version="krewcli-daemon",
                     provider=name,
-                    host_info={"endpoint_url": endpoint_url},
+                    host_info=_host_info(endpoint_url),
                 )
                 runtime_id = runtime.get("id")
                 if runtime_id:

@@ -30,18 +30,78 @@ import os
 import shutil
 
 import click
+import httpx
 
 from krewcli.auth import device_flow, token_store
 from krewcli.backend.registry import BACKEND_INFO, resolve_backends
 from krewcli.cli.daemon import _make_sync_client, _run_daemon
 
 
-async def _ensure_login(krew_auth_url: str) -> dict:
-    """Return a fresh login record; runs the device flow if missing."""
-    rec = token_store.load_record()
-    if rec and rec.get("token"):
+async def _password_login(
+    krew_auth_url: str, username: str, password: str, verify_ssl: bool = True,
+) -> dict:
+    """Direct krewauth password login — no device-flow ceremony.
+
+    Returns a record matching token_store's shape. Raises ClickException
+    on failure so the caller surfaces a clean message.
+    """
+    async with httpx.AsyncClient(timeout=10.0, verify=verify_ssl) as client:
+        try:
+            resp = await client.post(
+                f"{krew_auth_url}/auth/password/login",
+                json={"username": username, "password": password},
+            )
+        except httpx.RequestError as exc:
+            raise click.ClickException(f"krewauth unreachable: {exc}") from exc
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", "login_failed")
+        except Exception:
+            detail = "login_failed"
+        raise click.ClickException(f"login as {username!r} failed: {detail}")
+    body = resp.json()
+    return {
+        "token": body["token"],
+        "account_id": body["account_id"],
+        "expires_at": body["expires_at"],
+    }
+
+
+async def _ensure_login(
+    krew_auth_url: str,
+    user: str | None,
+    password: str | None,
+    verify_ssl: bool = True,
+) -> dict:
+    """Return a fresh login record.
+
+    Resolution order:
+      1. cached ~/.krewcli/token (skip if --user is explicitly set so
+         the operator can swap accounts without `krewcli logout`)
+      2. password login when --user / --password (or env vars) supplied
+      3. device flow (prints a code, waits for cookrew-beta to approve)
+    """
+    if not user:
+        rec = token_store.load_record()
+        if rec and rec.get("token"):
+            return rec
+
+    if user and password:
+        click.echo(f"Logging in as {user}…", err=True)
+        rec = await _password_login(krew_auth_url, user, password, verify_ssl)
+        token_store.save_record(rec)
+        token_store.save_token(rec["token"])
+        click.echo(f"Logged in · account={rec['account_id']}")
         return rec
-    click.echo("Not logged in — starting passkey/device flow against krewauth…", err=True)
+
+    if user and not password:
+        raise click.ClickException(
+            f"--user {user!r} given without a password. "
+            "Pass --password or set KREWCLI_PASSWORD."
+        )
+
+    click.echo("Not logged in — starting device flow against krewauth…", err=True)
+    click.echo("Tip: skip the device flow by passing -u/-p or KREWCLI_USERNAME/PASSWORD.", err=True)
     dc = await device_flow.request(krew_auth_url)
     device_flow.display_code(dc)
     tok = await device_flow.poll(krew_auth_url, dc.device_code)
@@ -109,6 +169,10 @@ def _autodetect_backends() -> list[str]:
 
 
 @click.command("up")
+@click.option("-u", "--user", default=None, envvar="KREWCLI_USERNAME",
+              help="krewauth username (or env KREWCLI_USERNAME) — skips device flow")
+@click.option("-p", "--password", default=None, envvar="KREWCLI_PASSWORD",
+              help="krewauth password (or env KREWCLI_PASSWORD)")
 @click.option("--cookbook", default=None, help="Cookbook ID (optional, auto-resolved)")
 @click.option("--recipe", default=None, help="Recipe ID (optional, auto-resolved)")
 @click.option("--workdir", default=None, help="Working directory (default: cwd)")
@@ -122,6 +186,8 @@ def _autodetect_backends() -> list[str]:
 @click.pass_context
 def up_cmd(
     ctx: click.Context,
+    user: str | None,
+    password: str | None,
     cookbook: str | None,
     recipe: str | None,
     workdir: str | None,
@@ -157,7 +223,9 @@ def up_cmd(
     # 2) Login + cookbook/recipe resolution (uses an isolated event loop
     #    so the daemon's loop later doesn't inherit a half-used client).
     async def _bootstrap():
-        record = await _ensure_login(settings.krew_auth_url)
+        record = await _ensure_login(
+            settings.krew_auth_url, user, password, settings.verify_ssl,
+        )
         client = _make_sync_client(settings)
         try:
             cb = await _ensure_cookbook(client, record["account_id"], cookbook)

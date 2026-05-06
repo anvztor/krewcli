@@ -504,7 +504,7 @@ class KrewHubClient:
         task_id: str,
         session_id: str,
         work_dir: str,
-        artifacts: list[dict[str, Any]] | None = None,
+        artifacts: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Pin session_id + work_dir on the task row for crash recovery."""
         resp = await self._client.post(
@@ -512,7 +512,7 @@ class KrewHubClient:
             json={
                 "session_id": session_id,
                 "work_dir": work_dir,
-                "artifacts": artifacts or [],
+                "artifacts": artifacts or {},
             },
         )
         resp.raise_for_status()

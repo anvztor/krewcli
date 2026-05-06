@@ -86,9 +86,11 @@ class DaemonLoop:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._owner = _get_owner_label()
         self._agent_ids: dict[str, str] = {}
+        self._runtime_ids: dict[str, str] = {}
         self._heartbeats: list[HeartbeatLoop] = []
         self._runtime_heartbeats: list[RuntimeHeartbeat] = []
         self._running_tasks: set[str] = set()
+        self._task_jobs: set[asyncio.Task] = set()
         self._planning_bundle: str | None = None
         self._watcher = None
 
@@ -149,9 +151,14 @@ class DaemonLoop:
 
         click.echo("  Daemon ready. Waiting for invocations...")
 
-        # Background loop: only planning (task dispatch is SSE-driven)
+        # Background loop: pull open cookrew tasks as a reliable fallback,
+        # then run planner for empty bundles. The A2A watcher still gives
+        # instant delivery when krewhub dispatches an invocation, but tasks
+        # created directly by cookrew-beta enter as normal open tasks with
+        # assigned_runtime_id and must be claimed from this loop.
         try:
             while True:
+                await self._poll_claimable_tasks()
                 await self._plan_empty_bundles()
                 await asyncio.sleep(self._poll_interval)
         except asyncio.CancelledError:
@@ -159,6 +166,10 @@ class DaemonLoop:
             await self._watcher.stop()
             if self._running_tasks:
                 click.echo(f"  Waiting for {len(self._running_tasks)} running task(s)...")
+            for job in list(self._task_jobs):
+                job.cancel()
+            if self._task_jobs:
+                await asyncio.gather(*self._task_jobs, return_exceptions=True)
             for hb in self._heartbeats:
                 await hb.stop()
             for rt_hb in self._runtime_heartbeats:
@@ -201,7 +212,6 @@ class DaemonLoop:
 
         # Resolve backend — prefer the agent named in the invocation
         backend_name = agent_name if agent_name in self._backends else next(iter(self._backends))
-        backend = self._backends[backend_name]
         agent_id = self._agent_ids.get(backend_name, f"{backend_name}@{self._owner}")
 
         click.echo(f"  → A2A invocation: task {task_id[:12]} via {backend_name}")
@@ -220,49 +230,172 @@ class DaemonLoop:
                 "bundle_prompt": prompt,
             })
 
-        # Execute through the harness
-        async with self._semaphore:
-            self._running_tasks.add(task_id)
+        self._running_tasks.add(task_id)
+        try:
+            result = await self._execute_task(
+                backend_name=backend_name,
+                agent_id=agent_id,
+                task_id=task_id,
+                bundle_id=bundle_id,
+                prompt=prompt,
+                task_detail=task_detail,
+                metadata=metadata,
+            )
+            status = "done" if result.success else "blocked"
+            click.echo(f"  ✓ Task {task_id[:12]} {status}: {result.summary[:80]}")
+            return {"text": result.summary[:4096]}
+
+        except Exception:
+            logger.exception("invocation: failed for task %s", task_id)
             try:
-                session = Session(self._client, task_id, agent_id)
-                execenv = ExecutionEnvironment(
-                    base_dir=self._working_dir,
-                    task_id=task_id,
-                    bundle_id=bundle_id,
-                    repo_url=metadata.get("repo_url", self._repo_url),
-                    branch=metadata.get("branch", self._branch),
+                await self._client.update_task_status(
+                    task_id, "blocked",
+                    blocked_reason="Daemon execution error",
                 )
-
-                harness = Harness(self._client)
-                result = await harness.execute(
-                    backend=backend,
-                    session=session,
-                    execenv=execenv,
-                    prompt=prompt,
-                    task_id=task_id,
-                    task_title=task_detail.get("title", ""),
-                    task_description=task_detail.get("description", ""),
-                    recipe_id=metadata.get("recipe_id", self._recipe_id),
-                    bundle_id=bundle_id,
-                )
-
-                status = "done" if result.success else "blocked"
-                click.echo(f"  ✓ Task {task_id[:12]} {status}: {result.summary[:80]}")
-
-                return {"text": result.summary[:4096]}
-
             except Exception:
-                logger.exception("invocation: failed for task %s", task_id)
-                try:
-                    await self._client.update_task_status(
-                        task_id, "blocked",
-                        blocked_reason="Daemon execution error",
-                    )
-                except Exception:
-                    pass
-                raise
-            finally:
-                self._running_tasks.discard(task_id)
+                pass
+            raise
+        finally:
+            self._running_tasks.discard(task_id)
+
+    # ------------------------------------------------------------------
+    # Cookrew task polling fallback
+    # ------------------------------------------------------------------
+
+    async def _poll_claimable_tasks(self) -> None:
+        """Claim and execute open tasks created directly through cookrew-beta."""
+        if len(self._running_tasks) >= self._max_concurrent:
+            return
+
+        try:
+            tasks = await self._client.poll_claimable_tasks(self._recipe_id)
+        except Exception:
+            logger.debug("poll_claimable_tasks failed", exc_info=True)
+            return
+
+        for task in tasks:
+            if len(self._running_tasks) >= self._max_concurrent:
+                return
+
+            task_id = task.get("id")
+            if not task_id or task_id in self._running_tasks:
+                continue
+
+            backend_name = self._select_backend_for_task(task)
+            if backend_name is None:
+                continue
+            agent_id = self._agent_ids.get(
+                backend_name, f"{backend_name}@{self._owner}",
+            )
+
+            try:
+                claimed = await self._client.claim_task(task_id, agent_id)
+            except Exception:
+                logger.debug(
+                    "claim failed for task %s via %s", task_id, agent_id,
+                    exc_info=True,
+                )
+                continue
+
+            task_detail = {**task, **claimed}
+            self._running_tasks.add(task_id)
+            job = asyncio.create_task(
+                self._run_claimed_task(task_detail, backend_name, agent_id),
+                name=f"cookrew-task:{task_id}",
+            )
+            self._task_jobs.add(job)
+            job.add_done_callback(self._task_jobs.discard)
+
+    def _select_backend_for_task(self, task: dict) -> str | None:
+        """Pick the local backend that should execute an open task."""
+        assigned_runtime_id = task.get("assigned_runtime_id")
+        if assigned_runtime_id:
+            for name, runtime_id in self._runtime_ids.items():
+                if runtime_id == assigned_runtime_id:
+                    return name
+
+        assigned_agent_id = task.get("assigned_agent_id")
+        if assigned_agent_id:
+            backend_name = str(assigned_agent_id).split("@", 1)[0]
+            if backend_name in self._backends:
+                return backend_name
+
+        # Cookrew A2 tasks are protected by account/runtime ownership at
+        # the claim endpoint. If the task points at a stale runtime row,
+        # falling back to a local backend lets the current daemon rescue
+        # the open task instead of leaving it permanently UNCLAIMED.
+        return next(iter(self._backends), None)
+
+    async def _run_claimed_task(
+        self, task: dict, backend_name: str, agent_id: str,
+    ) -> None:
+        task_id = task["id"]
+        try:
+            prompt = _build_prompt(task)
+            result = await self._execute_task(
+                backend_name=backend_name,
+                agent_id=agent_id,
+                task_id=task_id,
+                bundle_id=task.get("bundle_id", ""),
+                prompt=prompt,
+                task_detail=task,
+                metadata={"recipe_id": task.get("recipe_id", self._recipe_id)},
+            )
+            status = "done" if result.success else "blocked"
+            click.echo(
+                f"  ✓ Cookrew task {task_id[:12]} {status}: "
+                f"{result.summary[:80]}",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("cookrew task: failed for task %s", task_id)
+            try:
+                await self._client.update_task_status(
+                    task_id, "blocked",
+                    blocked_reason="Daemon execution error",
+                )
+            except Exception:
+                pass
+        finally:
+            self._running_tasks.discard(task_id)
+
+    async def _execute_task(
+        self,
+        *,
+        backend_name: str,
+        agent_id: str,
+        task_id: str,
+        bundle_id: str,
+        prompt: str,
+        task_detail: dict,
+        metadata: dict | None = None,
+    ):
+        backend = self._backends[backend_name]
+        metadata = metadata or {}
+        async with self._semaphore:
+            session = Session(self._client, task_id, agent_id)
+            execenv = ExecutionEnvironment(
+                base_dir=self._working_dir,
+                task_id=task_id,
+                bundle_id=bundle_id,
+                repo_url=metadata.get("repo_url", self._repo_url),
+                branch=metadata.get("branch", self._branch),
+                sandbox_id=task_detail.get("sandbox_id"),
+            )
+
+            harness = Harness(self._client)
+            return await harness.execute(
+                backend=backend,
+                session=session,
+                execenv=execenv,
+                prompt=prompt,
+                task_id=task_id,
+                task_title=task_detail.get("title", ""),
+                task_description=task_detail.get("description", ""),
+                recipe_id=metadata.get("recipe_id", self._recipe_id),
+                bundle_id=bundle_id,
+            )
 
     # ------------------------------------------------------------------
     # Registration
@@ -340,6 +473,7 @@ class DaemonLoop:
                 )
                 runtime_id = runtime.get("id")
                 if runtime_id:
+                    self._runtime_ids[name] = runtime_id
                     rt_hb = RuntimeHeartbeat(
                         client=self._client,
                         runtime_id=runtime_id,

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from krewcli.backend.protocol import BackendMessage, BackendResult, BackendSession
+from krewcli.daemon.harness import HarnessResult
 from krewcli.daemon.session import Session
 from krewcli.daemon.recovery import recover_orphans
 
@@ -145,3 +146,89 @@ class TestRecovery:
             status="blocked",
             blocked_reason="daemon_crash_recovery: task was in-flight when daemon stopped",
         )
+
+
+class _PollClient(_FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.claims: list[tuple[str, str]] = []
+        self.claimable = [
+            {
+                "id": "task_1",
+                "bundle_id": "bun_1",
+                "recipe_id": "rec_1",
+                "title": "ship from cookrew-beta",
+                "description": "created through the UI",
+                "status": "open",
+                "depends_on_task_ids": [],
+                "assigned_runtime_id": "rt_stale",
+                "sandbox_id": "sbx_1",
+            },
+        ]
+
+    async def poll_claimable_tasks(self, recipe_id):
+        assert recipe_id == "rec_1"
+        return self.claimable
+
+    async def claim_task(self, task_id, agent_id):
+        self.claims.append((task_id, agent_id))
+        return {
+            **self.claimable[0],
+            "status": "claimed",
+            "claimed_by_agent_id": agent_id,
+        }
+
+
+class TestDaemonLoopCookrewPolling:
+    @pytest.mark.asyncio
+    async def test_poll_claims_cookrew_task_and_runs_harness(self, tmp_path, monkeypatch):
+        from krewcli.backend.echo import EchoBackend
+        from krewcli.daemon.loop import DaemonLoop
+
+        executed: list[dict] = []
+
+        async def fake_execute(self, **kwargs):
+            executed.append(kwargs)
+            return HarnessResult(success=True, summary="ok")
+
+        monkeypatch.setattr("krewcli.daemon.loop.Harness.execute", fake_execute)
+
+        client = _PollClient()
+        loop = DaemonLoop(
+            client=client,
+            backends={"echo": EchoBackend()},
+            cookbook_id="cb_1",
+            recipe_id="rec_1",
+            working_dir=str(tmp_path),
+            max_concurrent=1,
+        )
+        loop._agent_ids = {"echo": "echo@krew"}
+
+        await loop._poll_claimable_tasks()
+        await asyncio.wait_for(asyncio.gather(*list(loop._task_jobs)), timeout=1)
+
+        assert client.claims == [("task_1", "echo@krew")]
+        assert len(executed) == 1
+        assert executed[0]["task_id"] == "task_1"
+        assert executed[0]["bundle_id"] == "bun_1"
+        assert "ship from cookrew-beta" in executed[0]["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_poll_respects_global_capacity(self, tmp_path, monkeypatch):
+        from krewcli.backend.echo import EchoBackend
+        from krewcli.daemon.loop import DaemonLoop
+
+        client = _PollClient()
+        loop = DaemonLoop(
+            client=client,
+            backends={"echo": EchoBackend()},
+            cookbook_id="cb_1",
+            recipe_id="rec_1",
+            working_dir=str(tmp_path),
+            max_concurrent=1,
+        )
+        loop._running_tasks.add("busy_task")
+
+        await loop._poll_claimable_tasks()
+
+        assert client.claims == []

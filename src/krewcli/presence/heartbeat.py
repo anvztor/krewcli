@@ -68,3 +68,46 @@ class HeartbeatLoop:
             except Exception as exc:
                 logger.warning("Heartbeat failed: %s", exc)
             await asyncio.sleep(self._interval)
+
+
+class RuntimeHeartbeat:
+    """Background heartbeat for an `agent_runtimes` row.
+
+    Distinct from HeartbeatLoop (which writes to `agent_presence`).
+    cookrew-beta's roster reads runtime rows; without a heartbeat
+    they go stale within 60s and the SPA shows the daemon offline.
+    """
+
+    def __init__(
+        self,
+        client: KrewHubClient,
+        runtime_id: str,
+        interval: int = 15,
+    ) -> None:
+        self._client = client
+        self._runtime_id = runtime_id
+        self._interval = interval
+        self._task: asyncio.Task | None = None
+
+    def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, asyncio.InvalidStateError):
+                pass
+            self._task = None
+
+    async def _loop(self) -> None:
+        while True:
+            try:
+                await self._client.heartbeat_runtime(self._runtime_id)
+                logger.debug("Runtime heartbeat sent (id=%s)", self._runtime_id)
+            except Exception as exc:
+                logger.warning("Runtime heartbeat failed: %s", exc)
+            await asyncio.sleep(self._interval)

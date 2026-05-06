@@ -37,7 +37,7 @@ from krewcli.daemon.session import Session
 from krewcli.daemon.execenv import ExecutionEnvironment
 from krewcli.daemon.recovery import recover_orphans
 from krewcli.gateway.identity import _get_owner_label, _make_agent_id
-from krewcli.presence.heartbeat import HeartbeatLoop
+from krewcli.presence.heartbeat import HeartbeatLoop, RuntimeHeartbeat
 
 if TYPE_CHECKING:
     from krewcli.client.krewhub_client import KrewHubClient
@@ -87,6 +87,7 @@ class DaemonLoop:
         self._owner = _get_owner_label()
         self._agent_ids: dict[str, str] = {}
         self._heartbeats: list[HeartbeatLoop] = []
+        self._runtime_heartbeats: list[RuntimeHeartbeat] = []
         self._running_tasks: set[str] = set()
         self._planning_bundle: str | None = None
         self._watcher = None
@@ -160,6 +161,8 @@ class DaemonLoop:
                 click.echo(f"  Waiting for {len(self._running_tasks)} running task(s)...")
             for hb in self._heartbeats:
                 await hb.stop()
+            for rt_hb in self._runtime_heartbeats:
+                await rt_hb.stop()
             raise
 
     # ------------------------------------------------------------------
@@ -272,7 +275,18 @@ class DaemonLoop:
         A2A hub gateway (not the daemon's local port). This way krewhub's
         GraphRunnerController dispatches to the hub, which stores the
         invocation for SSEWatcher pickup. No NAT traversal needed.
+
+        We register both a presence row (agent_presence — what krewhub
+        uses for routing) AND a runtime row (agent_runtimes — what
+        cookrew-beta's roster reads). Without the runtime row, the SPA's
+        Hire-Agent flow only ever sees stale paired-but-not-running
+        runtimes; tasks created via the SPA auto-bind to those instead
+        of this live daemon.
         """
+        from krewcli.auth.token_store import load_record
+        record = load_record() or {}
+        account_id = record.get("account_id")
+
         for name in self._backends:
             agent_id = self._agent_ids[name]
             info = BACKEND_INFO.get(name, {})
@@ -310,6 +324,35 @@ class DaemonLoop:
             )
             hb.start()
             self._heartbeats.append(hb)
+
+            # Runtime registration — surfaces this daemon in the SPA's
+            # /agents/runtimes feed so the user sees a live "claude@krew"
+            # row in the party drawer (not just stale paired runtimes).
+            if not account_id:
+                continue
+            try:
+                runtime = await self._client.register_runtime(
+                    agent_id=agent_id,
+                    account_id=account_id,
+                    daemon_version="krewcli-daemon",
+                    provider=name,
+                    host_info={"endpoint_url": endpoint_url},
+                )
+                runtime_id = runtime.get("id")
+                if runtime_id:
+                    rt_hb = RuntimeHeartbeat(
+                        client=self._client,
+                        runtime_id=runtime_id,
+                        interval=self._heartbeat_interval,
+                    )
+                    rt_hb.start()
+                    self._runtime_heartbeats.append(rt_hb)
+            except Exception:
+                logger.warning(
+                    "Runtime registration failed for %s — SPA roster won't "
+                    "see this daemon as live, but task execution still works",
+                    name,
+                )
 
     # ------------------------------------------------------------------
     # Planning: detect empty bundles and generate graph code

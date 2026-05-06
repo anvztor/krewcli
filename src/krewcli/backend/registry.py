@@ -18,12 +18,14 @@ def _ensure_registered() -> None:
 
     from krewcli.backend.claude import ClaudeBackend
     from krewcli.backend.codex import CodexBackend
+    from krewcli.backend.gemini import GeminiBackend
     from krewcli.backend.bub import BubBackend
     from krewcli.backend.echo import EchoBackend
 
     _BACKEND_FACTORIES.update({
         "claude": ClaudeBackend,
         "codex": CodexBackend,
+        "gemini": GeminiBackend,
         "bub": BubBackend,
         "echo": EchoBackend,
     })
@@ -32,19 +34,23 @@ def _ensure_registered() -> None:
 # Agent capabilities advertised to krewhub during registration.
 BACKEND_INFO: dict[str, dict[str, Any]] = {
     "claude": {
-        "display_name": "Claude Agent",
+        "display_name": "Claude",
         "capabilities": ["claim", "milestones", "facts", "code_refs", "generate-graph"],
     },
     "codex": {
-        "display_name": "Codex Agent",
+        "display_name": "Codex",
+        "capabilities": ["claim", "milestones", "facts", "code_refs", "generate-graph"],
+    },
+    "gemini": {
+        "display_name": "Gemini",
         "capabilities": ["claim", "milestones", "facts", "code_refs", "generate-graph"],
     },
     "bub": {
-        "display_name": "Bub Agent",
+        "display_name": "Bub",
         "capabilities": ["claim", "milestones", "facts", "code_refs", "generate-graph"],
     },
     "echo": {
-        "display_name": "Echo Agent (test)",
+        "display_name": "Echo (test)",
         "capabilities": ["claim", "milestones"],
     },
 }

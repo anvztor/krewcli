@@ -87,6 +87,7 @@ from krewcli.cli.daemon import register_daemon_commands  # noqa: E402
 from krewcli.cli.login import register as register_login  # noqa: E402
 from krewcli.cli.logout import register as register_logout  # noqa: E402
 from krewcli.cli.whoami import register as register_whoami  # noqa: E402
+from krewcli.cli.up import register as register_up  # noqa: E402
 from krewcli.cli_onboard import register_onboard_command  # noqa: E402
 from krewcli.cli_wallet import register_wallet_commands  # noqa: E402
 
@@ -98,6 +99,7 @@ register_daemon_commands(main)
 register_login(main)
 register_logout(main)
 register_whoami(main)
+register_up(main)
 register_onboard_command(main)
 register_wallet_commands(main)
 

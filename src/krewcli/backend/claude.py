@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import shutil
+import sys
+from pathlib import Path
 
 from krewcli.backend.protocol import (
     BackendMessage,
@@ -21,6 +23,73 @@ from krewcli.backend.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# MCP-config + arg helpers (Invocation Contract slice 4)
+# ---------------------------------------------------------------------------
+
+
+def write_mcp_config(
+    workdir: str | Path,
+    *,
+    krewhub_url: str,
+    task_id: str,
+    session_token: str,
+    parent_tape_id: str,
+    bundle_id: str,
+    recipe_id: str,
+) -> str:
+    """Generate the `--mcp-config` JSON file declaring the krewcli-bridge
+    stdio server.
+
+    Same workdir + same task → same file path → idempotent across retries.
+    """
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    config_path = workdir / ".krewcli" / "mcp_config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    body = {
+        "mcpServers": {
+            "krewcli-bridge": {
+                "command": sys.executable or "python",
+                "args": ["-m", "krewcli.mcp_servers.bridge"],
+                "env": {
+                    "KREWHUB_URL": krewhub_url,
+                    "KREWHUB_SESSION_TOKEN": session_token,
+                    "KREWHUB_TASK_ID": task_id,
+                    "KREWHUB_BUNDLE_ID": bundle_id,
+                    "KREWHUB_RECIPE_ID": recipe_id,
+                    "KREWHUB_PARENT_TAPE_ID": parent_tape_id,
+                },
+            }
+        }
+    }
+    config_path.write_text(json.dumps(body, indent=2), encoding="utf-8")
+    return str(config_path)
+
+
+def build_claude_args(
+    *,
+    prompt: str,
+    mcp_config_path: str | None = None,
+) -> list[str]:
+    """Assemble the `claude` CLI argv. Bridge MCP server is wired in
+    when `mcp_config_path` is supplied."""
+    args: list[str] = [
+        "claude",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--permission-mode", "bypassPermissions",
+    ]
+    if mcp_config_path:
+        args += [
+            "--mcp-config", str(mcp_config_path),
+            "--allowedTools", "mcp__krewcli-bridge__*",
+        ]
+    args += ["-p", prompt]
+    return args
 
 # asyncio StreamReader buffer — 4 MB to handle large tool results.
 _STREAM_LIMIT = 4 * 1024 * 1024
@@ -65,15 +134,30 @@ async def _run_claude(
     result_future: asyncio.Future[BackendResult],
 ) -> None:
     """Spawn claude CLI and stream its output into the queue."""
-    args = [
-        "claude",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--permission-mode", "bypassPermissions",
-        "-p", prompt,
-    ]
-
     proc_env = {**os.environ, **(extra_env or {})}
+
+    # If KREWHUB_TASK_ID is set, write a per-task .mcp_config.json so
+    # claude can call the krewcli-bridge `delegate` tool. The execenv
+    # surfaces KREWHUB_* vars; we re-use them here.
+    mcp_config_path: str | None = None
+    if proc_env.get("KREWHUB_TASK_ID") and proc_env.get("KREWHUB_URL"):
+        try:
+            mcp_config_path = write_mcp_config(
+                working_dir,
+                krewhub_url=proc_env.get("KREWHUB_URL", ""),
+                task_id=proc_env.get("KREWHUB_TASK_ID", ""),
+                session_token=proc_env.get("KREWHUB_SESSION_TOKEN", ""),
+                parent_tape_id=proc_env.get("KREWHUB_PARENT_TAPE_ID", ""),
+                bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
+                recipe_id=proc_env.get("KREWHUB_RECIPE_ID", ""),
+            )
+        except OSError as exc:
+            logger.warning(
+                "claude backend: failed to write mcp config: %s — "
+                "delegate tool will be unavailable", exc,
+            )
+
+    args = build_claude_args(prompt=prompt, mcp_config_path=mcp_config_path)
 
     try:
         process = await asyncio.create_subprocess_exec(

@@ -70,6 +70,8 @@ class Harness:
         task_description: str = "",
         recipe_id: str = "",
         bundle_id: str = "",
+        krewhub_url: str = "",
+        session_token: str = "",
     ) -> HarnessResult:
         """Execute a task through the full managed agent lifecycle."""
         # 1. Setup execution environment
@@ -103,7 +105,11 @@ class Harness:
                 )
 
         # 2. Pre-execution sandbox validation
-        env_overlay = execenv.build_env(recipe_id=recipe_id)
+        env_overlay = execenv.build_env(
+            recipe_id=recipe_id,
+            krewhub_url=krewhub_url,
+            session_token=session_token,
+        )
         pre_check = self._validator.validate_pre_execution(
             working_dir=workdir,
             env=env_overlay,

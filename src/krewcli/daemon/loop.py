@@ -443,6 +443,15 @@ class DaemonLoop:
             )
 
             harness = Harness(self._client)
+            # Surface krewhub URL + JWT to the agent's env so the
+            # krewcli-bridge MCP server can call back when the brain
+            # invokes `delegate(...)`. Without these, claude.py's MCP
+            # wiring guard skips and the brain has no `delegate` tool —
+            # which makes it reach for AskUserQuestion (denied) and
+            # then hallucinate operator answers.
+            from krewcli.auth.token_store import load_token
+            krewhub_url = self._client._client.base_url.__str__().rstrip("/")
+            session_token = load_token() or ""
             return await harness.execute(
                 backend=backend,
                 session=session,
@@ -452,6 +461,8 @@ class DaemonLoop:
                 task_title=task_detail.get("title", ""),
                 task_description=task_detail.get("description", ""),
                 recipe_id=metadata.get("recipe_id", self._recipe_id),
+                krewhub_url=krewhub_url,
+                session_token=session_token,
                 bundle_id=bundle_id,
             )
 

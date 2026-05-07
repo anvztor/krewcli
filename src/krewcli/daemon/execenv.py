@@ -142,11 +142,22 @@ class ExecutionEnvironment:
         self,
         recipe_id: str = "",
         extra: dict[str, str] | None = None,
+        *,
+        krewhub_url: str = "",
+        session_token: str = "",
+        parent_tape_id: str = "",
     ) -> dict[str, str]:
         """Build the subprocess environment overlay.
 
         Sets KREWHUB_* vars that the agent and its hooks can use
-        to identify the current execution context.
+        to identify the current execution context AND that the
+        krewcli-bridge MCP server uses to call back to krewhub when
+        the brain invokes `delegate(...)`.
+
+        Without `KREWHUB_URL` + `KREWHUB_SESSION_TOKEN`, the bridge
+        can't be wired into claude — the brain would silently lack a
+        `delegate` tool and either hallucinate operator answers or
+        give up.
         """
         env = {
             "KREWHUB_TASK_ID": self._task_id,
@@ -155,6 +166,12 @@ class ExecutionEnvironment:
             "KREWHUB_REPO_URL": self._repo_url,
             "KREWHUB_BRANCH": self._branch,
         }
+        if krewhub_url:
+            env["KREWHUB_URL"] = krewhub_url
+        if session_token:
+            env["KREWHUB_SESSION_TOKEN"] = session_token
+        if parent_tape_id:
+            env["KREWHUB_PARENT_TAPE_ID"] = parent_tape_id
         if extra:
             env.update(extra)
         return env

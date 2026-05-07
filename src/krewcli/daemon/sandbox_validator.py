@@ -136,12 +136,22 @@ _SECRET_VALUE_PATTERNS = _COMMON_SECRET_PATTERNS
 _OUTPUT_SECRET_PATTERNS = _COMMON_SECRET_PATTERNS
 
 # KREWHUB_ env vars that are safe task metadata (not secrets).
+# KREWHUB_SESSION_TOKEN holds the daemon's JWT and IS sensitive — but
+# it's required by the krewcli-bridge MCP server to call back to
+# krewhub when the brain invokes `delegate(...)`. Without it, the
+# bridge can't authenticate and the brain has no way to ask the
+# operator anything. We allow it through the validator with a noted
+# exception: production sandboxes should isolate this token via the
+# bridge's stdio (the brain itself never sees it).
 _KREWHUB_ALLOWED = frozenset({
     "KREWHUB_TASK_ID",
     "KREWHUB_BUNDLE_ID",
     "KREWHUB_RECIPE_ID",
     "KREWHUB_REPO_URL",
     "KREWHUB_BRANCH",
+    "KREWHUB_URL",
+    "KREWHUB_SESSION_TOKEN",
+    "KREWHUB_PARENT_TAPE_ID",
 })
 
 # Paths that must never be used as working directories.
@@ -292,7 +302,13 @@ class SandboxValidator:
                     ))
                     continue
 
-            # Check value against known secret patterns
+            # Check value against known secret patterns. KREWHUB_-allowed
+            # vars whose VALUE is itself credential material (the daemon's
+            # JWT for KREWHUB_SESSION_TOKEN) are exempt from pattern
+            # checks — they're required by the krewcli-bridge MCP server
+            # to authenticate `delegate(...)` callbacks to krewhub.
+            if name_upper in _KREWHUB_ALLOWED:
+                continue
             for pattern in _SECRET_VALUE_PATTERNS:
                 if pattern.search(value):
                     violations.append(SandboxViolation(

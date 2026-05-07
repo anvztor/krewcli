@@ -37,11 +37,11 @@ async def test_build_claude_args_includes_mcp_config(tmp_path):
     assert "claude" in args[0]
     assert "--mcp-config" in args
     assert str(config_path) in args
-    # allowedTools wildcard scoped to our bridge
-    assert any(
-        "mcp__krewcli-bridge" in a
-        for a in args
-    )
+    # AskUserQuestion is denied so the brain is forced to reach for
+    # `delegate(to="human", ...)` instead.
+    assert "--disallowedTools" in args
+    disallow_idx = args.index("--disallowedTools")
+    assert "AskUserQuestion" in args[disallow_idx + 1]
     assert "-p" in args
     assert "do the thing" in args
 

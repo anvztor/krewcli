@@ -82,14 +82,50 @@ def build_claude_args(
         "--output-format", "stream-json",
         "--verbose",
         "--permission-mode", "bypassPermissions",
+        # Force the brain to reach for `delegate` instead of the
+        # built-in `AskUserQuestion`. AskUserQuestion errors in headless
+        # `claude -p` (no local UI) and the model gives up.
+        "--disallowedTools", "AskUserQuestion",
     ]
     if mcp_config_path:
         args += [
             "--mcp-config", str(mcp_config_path),
-            "--allowedTools", "mcp__krewcli-bridge__*",
+            # Inject the delegate-vs-AskUserQuestion guidance via
+            # --append-system-prompt (TRUSTED source) so Claude's
+            # prompt-injection defenses don't flag it. Putting the
+            # same note into the user prompt or task description
+            # triggers Claude's "instructions from untrusted content"
+            # heuristic and the brain refuses to follow it.
+            "--append-system-prompt", _DELEGATE_SYSTEM_NOTE,
         ]
     args += ["-p", prompt]
     return args
+
+
+_DELEGATE_SYSTEM_NOTE = """\
+You are running headlessly in an e2b sandbox via krewcli. The only way to \
+interact with anything outside your own reasoning context — the human \
+operator, peer agents, or sandbox commands — is through the `delegate` \
+tool exposed by the krewcli-bridge MCP server (named \
+`mcp__krewcli-bridge__delegate`).
+
+  delegate({
+    to: "human" | "sandbox:<id>" | "agent:<id>",
+    input: <string-or-object>,
+    schema?: <MCP-elicitation-subset-schema>,
+    deadline_s?: 300,
+    label?: <short-tag>
+  })
+  → ResultEnvelope { action: "accept"|"decline"|"cancel"|"error",
+                     content?, reason? }
+
+When a task asks you to ask, query, request input from, or otherwise \
+involve the human operator, call `delegate(to: "human", input: <question>, \
+schema: <optional schema>)`. This is the only way to reach the operator; \
+there is no local UI. Failures are values — `delegate` always returns a \
+ResultEnvelope, never raises. The `AskUserQuestion` tool is unavailable in \
+this environment.\
+"""
 
 # asyncio StreamReader buffer — 4 MB to handle large tool results.
 _STREAM_LIMIT = 4 * 1024 * 1024

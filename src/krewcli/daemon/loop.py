@@ -184,6 +184,9 @@ class DaemonLoop:
             on_invocation=self._handle_invocation,
             poll_interval=self._poll_interval,
             token_reloader=load_token,
+            # Match the daemon's harness semaphore so the watcher
+            # doesn't queue invocations the harness can't run anyway.
+            max_concurrent_invocations=self._max_concurrent,
         )
         self._watcher.start()
         click.echo(f"  SSE watcher started (poll={self._poll_interval}s)")

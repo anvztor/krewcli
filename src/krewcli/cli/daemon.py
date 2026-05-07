@@ -41,6 +41,16 @@ def daemon() -> None:
 @click.option("--poll-interval", default=5.0, type=float, help="Seconds between polls")
 @click.option("--repo-url", default="", help="Repository URL for code ref tracking")
 @click.option("--branch", default="", help="Branch name for code ref tracking")
+@click.option(
+    "--background/--foreground",
+    "background",
+    default=False,
+    help=(
+        "Run the daemon detached (default: foreground, blocking). "
+        "Background mode forks a child process, writes ~/.krewcli/daemon.pid, "
+        "and exits — same UX as multica daemon start."
+    ),
+)
 @click.pass_context
 def start(
     ctx: click.Context,
@@ -52,6 +62,7 @@ def start(
     poll_interval: float,
     repo_url: str,
     branch: str,
+    background: bool,
 ) -> None:
     """Start the daemon. Polls krewhub for tasks and executes them.
 
@@ -143,7 +154,69 @@ def start(
     if not backends:
         raise click.ClickException("No backends resolved.")
 
-    # ── Start the daemon (single asyncio.run for the lifetime) ───
+    # ── Background mode: fork a child running the same command with
+    #    --foreground and exit. Mirrors multica's daemon start UX. ───
+
+    if background:
+        from krewcli.daemon import supervisor
+
+        existing = supervisor.read_status()
+        if existing:
+            raise click.ClickException(
+                f"Daemon already running (pid {existing['pid']}). "
+                f"Run `krewcli daemon stop` first."
+            )
+
+        child_args = _build_foreground_args(
+            cookbook_id=resolved_cookbook,
+            recipe_id=resolved_recipe,
+            workdir=resolved_workdir,
+            agents=list(backends.keys()),
+            max_concurrent=max_concurrent,
+            poll_interval=poll_interval,
+            repo_url=repo_url,
+            branch=branch,
+        )
+        # Seed status before fork so `daemon status` works even if the
+        # child takes a moment to write its own ready marker.
+        supervisor.write_status({
+            "cookbook_id": resolved_cookbook,
+            "recipe_id": resolved_recipe,
+            "agents": list(backends.keys()),
+            "workdir": resolved_workdir,
+            "started_at": _now_iso(),
+            "ready": False,
+        })
+        pid = supervisor.spawn_detached(child_args)
+        click.echo(f"\nkrewcli daemon spawned (pid {pid})")
+        click.echo(f"  Logs: {supervisor.log_path()}")
+
+        if supervisor.wait_until_ready(pid):
+            click.echo(
+                f"  Agents online: {', '.join(backends.keys())} — "
+                f"cookbook {resolved_cookbook}, recipe {resolved_recipe}"
+            )
+        else:
+            click.echo(
+                "  Daemon did not signal ready within 15s — check the log "
+                "above for errors. Use `krewcli daemon status` to recheck.",
+                err=True,
+            )
+        return
+
+    # ── Foreground mode: write status sidecar then block on the loop. ─
+
+    from krewcli.daemon import supervisor
+
+    supervisor.write_status({
+        "cookbook_id": resolved_cookbook,
+        "recipe_id": resolved_recipe,
+        "agents": list(backends.keys()),
+        "workdir": resolved_workdir,
+        "started_at": _now_iso(),
+        "ready": False,
+    })
+    supervisor.write_pid(os.getpid())
 
     click.echo("\nkrewcli daemon starting")
     click.echo(f"  KrewHub:    {settings.krewhub_url}")
@@ -153,18 +226,20 @@ def start(
     click.echo(f"  Work dir:   {resolved_workdir}")
     click.echo(f"  Concurrent: {max_concurrent}")
 
-    # Create a fresh client for the daemon event loop.
-    asyncio.run(_run_daemon(
-        settings=settings,
-        backends=backends,
-        cookbook_id=resolved_cookbook,
-        recipe_id=resolved_recipe,
-        working_dir=resolved_workdir,
-        repo_url=repo_url,
-        branch=branch,
-        max_concurrent=max_concurrent,
-        poll_interval=poll_interval,
-    ))
+    try:
+        asyncio.run(_run_daemon(
+            settings=settings,
+            backends=backends,
+            cookbook_id=resolved_cookbook,
+            recipe_id=resolved_recipe,
+            working_dir=resolved_workdir,
+            repo_url=repo_url,
+            branch=branch,
+            max_concurrent=max_concurrent,
+            poll_interval=poll_interval,
+        ))
+    finally:
+        supervisor.clear()
 
 
 async def _run_daemon(
@@ -211,11 +286,44 @@ async def _run_daemon(
 
 
 @daemon.command()
-@click.pass_context
-def status(ctx: click.Context) -> None:
-    """Show daemon status (agents, running tasks)."""
-    click.echo("Daemon status check not yet implemented for pull-based daemon.")
-    click.echo("Use krewhub agent presence API to check registered agents.")
+def status() -> None:
+    """Show daemon status — pid, agents, cookbook, recipe."""
+    from krewcli.daemon import supervisor
+
+    info = supervisor.read_status()
+    if info is None:
+        click.echo("Daemon: stopped")
+        return
+    click.echo(f"Daemon:    running (pid {info['pid']})")
+    if info.get("started_at"):
+        click.echo(f"Started:   {info['started_at']}")
+    if info.get("cookbook_id"):
+        click.echo(f"Cookbook:  {info['cookbook_id']}")
+    if info.get("recipe_id"):
+        click.echo(f"Recipe:    {info['recipe_id']}")
+    if info.get("agents"):
+        click.echo(f"Agents:    {', '.join(info['agents'])}")
+    if info.get("workdir"):
+        click.echo(f"Workdir:   {info['workdir']}")
+    click.echo(f"Logs:      {supervisor.log_path()}")
+
+
+@daemon.command()
+def stop() -> None:
+    """Stop the running daemon (SIGTERM, SIGKILL fallback)."""
+    from krewcli.daemon import supervisor
+
+    info = supervisor.read_status()
+    if info is None:
+        click.echo("Daemon: not running")
+        return
+    pid = info["pid"]
+    if supervisor.stop():
+        click.echo(f"Daemon stopped (pid {pid})")
+    else:
+        raise click.ClickException(
+            f"Failed to stop daemon (pid {pid}); check process state manually."
+        )
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -234,5 +342,48 @@ def _make_sync_client(settings) -> KrewHubClient:
         jwt_token=load_token(),
         verify_ssl=settings.verify_ssl,
     )
+
+
+def _now_iso() -> str:
+    """Return current UTC time as ISO-8601 (seconds resolution)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _build_foreground_args(
+    *,
+    cookbook_id: str,
+    recipe_id: str,
+    workdir: str,
+    agents: list[str],
+    max_concurrent: int,
+    poll_interval: float,
+    repo_url: str,
+    branch: str,
+) -> list[str]:
+    """Build the argv tail passed to the spawned `daemon start --foreground`.
+
+    Mirrors multica's buildDaemonStartArgs — every choice the parent
+    resolved (cookbook, recipe, agents, workdir) is forwarded to the
+    child so it doesn't re-prompt or re-detect.
+    """
+    args: list[str] = ["--foreground"]
+    if cookbook_id:
+        args += ["--cookbook", cookbook_id]
+    if recipe_id:
+        args += ["--recipe", recipe_id]
+    if workdir:
+        args += ["--workdir", workdir]
+    if agents:
+        args += ["--agents", ",".join(agents)]
+    if max_concurrent:
+        args += ["--max-concurrent", str(max_concurrent)]
+    if poll_interval:
+        args += ["--poll-interval", str(poll_interval)]
+    if repo_url:
+        args += ["--repo-url", repo_url]
+    if branch:
+        args += ["--branch", branch]
+    return args
 
 

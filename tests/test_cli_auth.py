@@ -109,12 +109,223 @@ class TestLoginCommand:
         monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
         monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
 
-        result = runner.invoke(main, ["login"])
+        # `--no-start` is the primitive token-only path. The default
+        # behaviour now mirrors multica login → daemon up; that path is
+        # exercised by the daemon / up integration tests.
+        result = runner.invoke(main, ["login", "--no-start"])
         assert result.exit_code == 0, result.output
         assert "Logged in as acc_test123456" in result.output
         # Both record + raw-token files written
         assert (tmp_path / "token.json").is_file()
         assert (tmp_path / "token").read_text().strip() == "jwt-test-token"
+
+
+    def _stub_login_environment(self, tmp_path, monkeypatch):
+        """Wire up mocks shared by both default and --foreground tests."""
+        from krewcli.auth import device_flow, token_store
+        from krewcli.cli import login as login_mod
+        from krewcli.daemon import supervisor
+
+        async def fake_request(_url):
+            return device_flow.DeviceCode(
+                device_code="dc_e2e",
+                user_code="ZZZZ-0000",
+                verification_uri="http://example/verify",
+                expires_in=600,
+            )
+
+        async def fake_poll(_url, _device_code, *, interval=3.0, timeout=600.0):
+            return device_flow.DeviceToken(
+                token="jwt-e2e-token",
+                account_id="acc_e2e_test",
+                expires_at="2099-01-01T00:00:00Z",
+            )
+
+        monkeypatch.setattr(device_flow, "request", fake_request)
+        monkeypatch.setattr(device_flow, "poll", fake_poll)
+        monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
+        monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
+        # Isolate supervisor state from the developer's real ~/.krewcli.
+        monkeypatch.setattr(supervisor, "_DEFAULT_DIR", tmp_path / ".krewcli")
+
+        # Force the autodetect set: only `claude` looks installed. We
+        # short-circuit `which` to avoid leaking the developer's real
+        # PATH (claude/codex/gemini all installed on this box).
+        monkeypatch.setattr(
+            login_mod.shutil,
+            "which",
+            lambda name: "/fake/claude" if name == "claude" else None,
+        )
+
+        class _FakeResp:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class _FakeHTTP:
+            def __init__(self):
+                self.posts: list[tuple[str, dict]] = []
+
+            async def post(self, url, json=None):
+                self.posts.append((url, json or {}))
+                return _FakeResp({
+                    "cookbook": {"id": "cb_e2e", "name": "my-cookbook"},
+                })
+
+            class _BaseURL:
+                def __str__(self):  # noqa: D401 - mimic httpx URL
+                    return "http://krewhub.fake/"
+
+            base_url = _BaseURL()
+
+        class _FakeClient:
+            def __init__(self, *args, **kwargs):
+                self._client = _FakeHTTP()
+                self.calls: list[str] = []
+
+            async def list_cookbooks(self):
+                self.calls.append("list_cookbooks")
+                return []
+
+            async def get_cookbook(self, cb_id):
+                self.calls.append(f"get_cookbook:{cb_id}")
+                return {"recipes": []}
+
+            async def create_recipe(self, *, name, repo_url, created_by, cookbook_id):
+                self.calls.append(
+                    f"create_recipe:{name}:{cookbook_id}:{created_by}",
+                )
+                return {"id": "rec_e2e", "name": name}
+
+            async def close(self):
+                self.calls.append("close")
+
+        captured: dict = {}
+
+        def fake_make_sync_client(_settings):
+            client = _FakeClient()
+            captured["client"] = client
+            return client
+
+        monkeypatch.setattr(login_mod, "_make_sync_client", fake_make_sync_client)
+        return captured, login_mod, supervisor
+
+    def test_login_foreground_runs_daemon_inline(self, runner, tmp_path, monkeypatch):
+        """`krewcli login --foreground` resolves cookbook/recipe and hands
+        off to `_run_daemon` with the resolved config — same chain as
+        `krewcli up` but driven by login.
+        """
+        captured, login_mod, _supervisor = self._stub_login_environment(
+            tmp_path, monkeypatch,
+        )
+
+        async def fake_run_daemon(**kwargs):
+            captured["daemon_kwargs"] = kwargs
+
+        monkeypatch.setattr(login_mod, "_run_daemon", fake_run_daemon)
+
+        result = runner.invoke(
+            main, ["login", "--foreground", "--workdir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Logged in as acc_e2e_test" in result.output
+        assert "agents online" in result.output
+
+        client = captured["client"]
+        assert "list_cookbooks" in client.calls
+        assert any(url.endswith("/cookbooks") for url, _ in client._client.posts)
+        assert any(
+            c.startswith("create_recipe:my-recipe:cb_e2e:") for c in client.calls
+        )
+        kw = captured["daemon_kwargs"]
+        assert kw["cookbook_id"] == "cb_e2e"
+        assert kw["recipe_id"] == "rec_e2e"
+        assert "claude" in kw["backends"]
+        assert kw["working_dir"] == str(tmp_path)
+
+    def test_login_default_spawns_background_daemon(self, runner, tmp_path, monkeypatch):
+        """Default `krewcli login` mirrors multica login → daemon up.
+
+        Forks a detached child via supervisor.spawn_detached and exits
+        cleanly. We mock spawn_detached + wait_until_ready to verify the
+        chain without actually launching a child Python process.
+        """
+        captured, _login_mod, supervisor_mod = self._stub_login_environment(
+            tmp_path, monkeypatch,
+        )
+
+        spawn_calls: list[list[str]] = []
+
+        def fake_spawn(args):
+            spawn_calls.append(list(args))
+            return 424242
+
+        monkeypatch.setattr(supervisor_mod, "spawn_detached", fake_spawn)
+        monkeypatch.setattr(
+            supervisor_mod, "wait_until_ready", lambda pid, **_: True,
+        )
+
+        result = runner.invoke(main, ["login", "--workdir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "Logged in as acc_e2e_test" in result.output
+        assert "agents online" in result.output
+        assert "Daemon pid: 424242" in result.output
+
+        # Spawn was invoked exactly once with the resolved foreground args.
+        assert len(spawn_calls) == 1
+        argv = spawn_calls[0]
+        assert "--foreground" in argv
+        assert argv[argv.index("--cookbook") + 1] == "cb_e2e"
+        assert argv[argv.index("--recipe") + 1] == "rec_e2e"
+        assert argv[argv.index("--agents") + 1] == "claude"
+        assert argv[argv.index("--workdir") + 1] == str(tmp_path)
+
+        # Status sidecar was seeded so `daemon status` works immediately.
+        status_path = supervisor_mod.status_path()
+        assert status_path.is_file()
+
+    def test_login_idempotent_when_daemon_already_running(self, runner, tmp_path, monkeypatch):
+        """If a daemon is already running, login skips the bootstrap +
+        spawn and just acknowledges the running state. Mirrors
+        multica's syncToken-without-restart path.
+        """
+        captured, _login_mod, supervisor_mod = self._stub_login_environment(
+            tmp_path, monkeypatch,
+        )
+
+        monkeypatch.setattr(
+            supervisor_mod,
+            "read_status",
+            lambda: {
+                "pid": 99999,
+                "alive": True,
+                "agents": ["claude", "codex"],
+                "cookbook_id": "cb_x",
+                "recipe_id": "rec_x",
+            },
+        )
+
+        spawn_called: list = []
+
+        monkeypatch.setattr(
+            supervisor_mod,
+            "spawn_detached",
+            lambda args: spawn_called.append(args) or 0,
+        )
+
+        result = runner.invoke(main, ["login", "--workdir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "Daemon already running (pid 99999)" in result.output
+        assert "Agents: claude, codex" in result.output
+        # Bootstrap (cookbook/recipe resolution) was skipped — no list_cookbooks.
+        assert "client" not in captured
+        # No new daemon was spawned.
+        assert spawn_called == []
 
 
 class TestLogoutCommand:

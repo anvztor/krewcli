@@ -41,6 +41,7 @@ from krewcli.daemon.harness import Harness
 from krewcli.daemon.session import Session
 from krewcli.daemon.execenv import ExecutionEnvironment
 from krewcli.daemon.recovery import recover_orphans
+from krewcli.daemon import supervisor
 from krewcli.gateway.identity import _get_owner_label, _make_agent_id
 from krewcli.presence.heartbeat import HeartbeatLoop, RuntimeHeartbeat
 
@@ -160,6 +161,17 @@ class DaemonLoop:
 
         # Register agents (with endpoint_url for A2A hub routing)
         await self._register_and_heartbeat()
+
+        # Mark the daemon ready in the status sidecar so the supervisor
+        # can confirm bootstrap completion and `daemon status` can report
+        # registered agents/cookbook/recipe without scraping logs.
+        supervisor.update_status({
+            "ready": True,
+            "agents": list(self._agent_ids.keys()),
+            "agent_ids": dict(self._agent_ids),
+            "runtime_ids": dict(self._runtime_ids),
+            "registered_at": int(asyncio.get_event_loop().time()),
+        })
 
         # Start SSEWatcher — the informer that watches krewhub for
         # A2A invocations via dual-path delivery (poll + SSE).

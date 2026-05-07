@@ -204,3 +204,47 @@ class TestSettingsImmutability:
     def test_unknown_field_raises(self):
         with pytest.raises(Exception):
             Settings(not_a_field="boom")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Auto-derive: krewhub URL inferred from krew_auth URL
+# ---------------------------------------------------------------------------
+
+
+class TestKrewhubAutoDerive:
+    """A user that exports ``KREWCLI_KREW_AUTH_URL=https://auth.cookrew.dev``
+    almost always means ``hub.cookrew.dev`` for krewhub. Without this
+    auto-derive, login auth succeeds against prod but the daemon
+    silently bootstraps against ``http://127.0.0.1:8420`` and no
+    agents come online.
+    """
+
+    def test_derives_when_only_auth_overridden(self, monkeypatch):
+        monkeypatch.setenv("KREWCLI_KREW_AUTH_URL", "https://auth.cookrew.dev")
+        s = Settings()
+        assert s.krew_auth_url == "https://auth.cookrew.dev"
+        assert s.krewhub_url == "https://hub.cookrew.dev"
+
+    def test_preserves_explicit_krewhub_override(self, monkeypatch):
+        monkeypatch.setenv("KREWCLI_KREW_AUTH_URL", "https://auth.cookrew.dev")
+        monkeypatch.setenv("KREWCLI_KREWHUB_URL", "http://127.0.0.1:9999")
+        s = Settings()
+        assert s.krewhub_url == "http://127.0.0.1:9999"
+
+    def test_does_not_derive_for_arbitrary_host(self, monkeypatch):
+        """Hosts that don't start with `auth.` aren't guessed — silent
+        derivation in that case would mask config bugs."""
+        monkeypatch.setenv("KREWCLI_KREW_AUTH_URL", "https://login.example.com")
+        s = Settings()
+        # Falls back to localhost default; user must set krewhub explicitly.
+        assert s.krewhub_url == "http://127.0.0.1:8420"
+
+    def test_preserves_port_during_derive(self, monkeypatch):
+        monkeypatch.setenv("KREWCLI_KREW_AUTH_URL", "https://auth.example.com:8443")
+        s = Settings()
+        assert s.krewhub_url == "https://hub.example.com:8443"
+
+    def test_no_derive_when_both_at_default(self):
+        s = Settings()
+        assert s.krewhub_url == "http://127.0.0.1:8420"
+        assert s.krew_auth_url == "http://127.0.0.1:8421"

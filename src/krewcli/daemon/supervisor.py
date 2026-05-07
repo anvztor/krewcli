@@ -150,10 +150,14 @@ def spawn_detached(daemon_args: list[str]) -> int:
 
 
 def wait_until_ready(pid: int, timeout: float = 15.0, interval: float = 0.3) -> bool:
-    """Block until the daemon writes its status file (proof it bootstrapped).
+    """Block until the daemon signals ready in its status file.
 
-    Returns True if the daemon registered itself within ``timeout``.
-    Returns False if the process died first or didn't write status in time.
+    Returns True only when the sidecar shows ``ready: True`` — DaemonLoop
+    sets that after a successful ``_register_and_heartbeat`` call.
+    Returns False if the process dies first OR if the ready marker
+    doesn't appear within ``timeout`` (a daemon that's alive but never
+    registered any agent is just as broken as a dead one — don't lie
+    to the caller about it).
     """
     deadline = time.monotonic() + timeout
     s = status_path()
@@ -169,7 +173,7 @@ def wait_until_ready(pid: int, timeout: float = 15.0, interval: float = 0.3) -> 
             if meta.get("ready"):
                 return True
         time.sleep(interval)
-    return _is_alive(pid)
+    return False
 
 
 def stop(timeout: float = 10.0) -> bool:

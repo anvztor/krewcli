@@ -331,12 +331,25 @@ class DaemonLoop:
             logger.debug("poll_claimable_tasks failed", exc_info=True)
             return
 
+        # Per-task claim-failure cooldown so we don't hammer /claim with
+        # 400s every poll cycle when a task is structurally unclaimable
+        # (orphan from a stale runtime, already-claimed-elsewhere, etc.)
+        if not hasattr(self, "_claim_failure_count"):
+            self._claim_failure_count = {}  # type: ignore[attr-defined]
+            self._claim_failure_until = {}  # type: ignore[attr-defined]
+
+        loop_now = asyncio.get_event_loop().time()
+
         for task in tasks:
             if len(self._running_tasks) >= self._max_concurrent:
                 return
 
             task_id = task.get("id")
             if not task_id or task_id in self._running_tasks:
+                continue
+
+            cooldown_until = self._claim_failure_until.get(task_id, 0)  # type: ignore[attr-defined]
+            if cooldown_until > loop_now:
                 continue
 
             backend_name = self._select_backend_for_task(task)
@@ -349,11 +362,22 @@ class DaemonLoop:
             try:
                 claimed = await self._client.claim_task(task_id, agent_id)
             except Exception:
+                fails = self._claim_failure_count.get(task_id, 0) + 1  # type: ignore[attr-defined]
+                self._claim_failure_count[task_id] = fails  # type: ignore[attr-defined]
+                # Exponential backoff capped at 5 min:
+                # 1: 30s, 2: 60s, 3: 120s, 4: 240s, 5+: 300s
+                backoff = min(300, 30 * (2 ** (fails - 1)))
+                self._claim_failure_until[task_id] = loop_now + backoff  # type: ignore[attr-defined]
                 logger.debug(
-                    "claim failed for task %s via %s", task_id, agent_id,
+                    "claim failed for task %s via %s (fail #%d, cooldown %ds)",
+                    task_id, agent_id, fails, backoff,
                     exc_info=True,
                 )
                 continue
+            else:
+                # Successful claim resets the cooldown for this task.
+                self._claim_failure_count.pop(task_id, None)  # type: ignore[attr-defined]
+                self._claim_failure_until.pop(task_id, None)  # type: ignore[attr-defined]
 
             task_detail = {**task, **claimed}
             self._running_tasks.add(task_id)
@@ -450,7 +474,9 @@ class DaemonLoop:
             # which makes it reach for AskUserQuestion (denied) and
             # then hallucinate operator answers.
             from krewcli.auth.token_store import load_token
-            krewhub_url = self._client._client.base_url.__str__().rstrip("/")
+            inner = getattr(self._client, "_client", None)
+            base_url = getattr(inner, "base_url", "") if inner is not None else ""
+            krewhub_url = str(base_url).rstrip("/") if base_url else ""
             session_token = load_token() or ""
             return await harness.execute(
                 backend=backend,

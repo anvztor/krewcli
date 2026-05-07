@@ -240,6 +240,16 @@ class DaemonLoop:
             Result dict on success, or raises on failure (SSEWatcher
             catches exceptions and POSTs error to /a2a/respond).
         """
+        # Method dispatch — Invocation Contract §10.3 introduced
+        # method="delegate" for brain-to-brain delegate calls without a
+        # task lifecycle. Route those to the dedicated handler before
+        # we even look at the legacy task-shaped params.
+        if payload.get("method") == "delegate":
+            from krewcli.daemon.delegate_handler import handle_delegate_invocation
+            return await handle_delegate_invocation(
+                payload, self._backends, working_dir=self._working_dir,
+            )
+
         params = payload.get("params", {})
         message = params.get("message", {})
         metadata = message.get("metadata", {})

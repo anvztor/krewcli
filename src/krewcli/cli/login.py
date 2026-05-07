@@ -28,10 +28,8 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-from datetime import datetime, timedelta, timezone
 
 import click
-import jwt
 
 from krewcli.auth import device_flow, token_store
 from krewcli.backend.registry import BACKEND_INFO, resolve_backends
@@ -46,55 +44,17 @@ from krewcli.config import get_settings
 from krewcli.daemon import supervisor
 
 
-_TOKEN_REFRESH_LEAD = timedelta(minutes=5)
+async def _login_token() -> dict:
+    """Run a fresh device flow and persist the resulting token.
 
-
-def _cached_token_is_valid(record: dict | None) -> bool:
-    """Return True if the cached token has at least 5 minutes left.
-
-    Decodes the JWT exp claim without signature verification — that's
-    fine here, we're only deciding "skip device flow vs not". A truly
-    forged token would still get rejected by krewhub on the next
-    request, and we'd fall back to a fresh device flow then.
+    Each ``krewcli login`` invocation produces a new device pair on
+    purpose: the agent JWT is sandboxed to one daemon session, and
+    rotating it on every pairing is good security hygiene. The
+    *human* session stays alive across pairings via the
+    ``krewauth_session`` cookie at auth.cookrew.dev — when the
+    operator approves the new pair in the browser, no password
+    re-entry is required as long as the cookie is still valid.
     """
-    if not record:
-        return False
-    token = record.get("token")
-    if not token:
-        return False
-    try:
-        payload = jwt.decode(token, options={"verify_signature": False})
-    except Exception:
-        return False
-    exp = payload.get("exp")
-    if not isinstance(exp, (int, float)):
-        return False
-    deadline = datetime.fromtimestamp(int(exp), tz=timezone.utc)
-    return deadline > datetime.now(timezone.utc) + _TOKEN_REFRESH_LEAD
-
-
-async def _login_token(force: bool = False) -> dict:
-    """Return a fresh token record — reuse cache when valid, else device flow.
-
-    Mirrors multica's renderer: re-running login while a valid cookie
-    session exists is a no-op (UI just reflects the existing user).
-    Forcing the device flow on every ``krewcli login`` invocation
-    burns one user_code + cookrew round-trip per call, which is the
-    "input password again every time" UX the user complained about.
-
-    ``force=True`` (``--force`` flag) bypasses the cache for explicit
-    account swaps.
-    """
-    if not force:
-        cached = token_store.load_record()
-        if cached is not None and _cached_token_is_valid(cached):
-            click.echo(
-                f"Already logged in as {cached.get('account_id', '?')} "
-                f"(token valid until {cached.get('expires_at', '?')}). "
-                f"Pass --force to re-authenticate."
-            )
-            return cached
-
     settings = get_settings()
     dc = await device_flow.request(settings.krew_auth_url)
     device_flow.display_code(dc)
@@ -132,12 +92,6 @@ def _autodetect_backends() -> list[str]:
     default=False,
     help="Run the daemon in the foreground (blocking) instead of detaching.",
 )
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Re-authenticate even if a valid cached token exists (use to switch accounts).",
-)
 @click.option("--cookbook", default=None, help="Cookbook ID (optional, auto-resolved)")
 @click.option("--recipe", default=None, help="Recipe ID (optional, auto-resolved)")
 @click.option("--workdir", default=None, help="Working directory (default: cwd)")
@@ -153,7 +107,6 @@ def login_cmd(
     ctx: click.Context,
     no_start: bool,
     foreground: bool,
-    force: bool,
     cookbook: str | None,
     recipe: str | None,
     workdir: str | None,
@@ -178,8 +131,12 @@ def login_cmd(
     """
     settings = ctx.obj["settings"] if ctx.obj and "settings" in ctx.obj else get_settings()
 
-    # 1) Reuse cached token when valid; otherwise device flow + persist.
-    record = asyncio.run(_login_token(force=force))
+    # 1) Always run a fresh device flow — each `krewcli login` is one
+    #    pairing session. The human's web session at auth.cookrew.dev
+    #    persists across pairings via cookie auto-resume, so the
+    #    operator doesn't re-enter a password unless the cookie has
+    #    actually expired.
+    record = asyncio.run(_login_token())
 
     if no_start:
         return

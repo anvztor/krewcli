@@ -289,95 +289,61 @@ class TestLoginCommand:
         status_path = supervisor_mod.status_path()
         assert status_path.is_file()
 
-    def test_login_reuses_cached_valid_token(self, runner, tmp_path, monkeypatch):
-        """`krewcli login` should skip device flow when a valid JWT
-        is already on disk — re-running the command must not burn a
-        new user_code or prompt the operator to re-authenticate.
+    def test_login_always_runs_fresh_device_flow(self, runner, tmp_path, monkeypatch):
+        """Each `krewcli login` invocation runs a fresh device flow,
+        even when a token is already on disk.
 
-        Mirrors the multica renderer: re-firing login while the
-        cookie is still valid is a no-op that just reflects the
-        existing user.
+        Bug history: an earlier version cached the JWT and silently
+        returned without pairing, but the agent JWT is sandboxed to
+        one daemon session — rotating it on every pairing is good
+        security hygiene, and the human's web session persists via
+        cookie at auth.cookrew.dev so the operator doesn't re-enter
+        credentials.
         """
-        import jwt as _jwt
-        from krewcli.auth import token_store
-        from krewcli.cli import login as login_mod
-
-        monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
-        monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
-
-        # Seed a cached token whose exp is well in the future (year 2286).
-        cached_token = _jwt.encode(
-            {"sub": "acc_cached_user", "exp": 9999999999},
-            "secret-doesnt-matter-no-verify",
-            algorithm="HS256",
-        )
-        token_store.save_record({
-            "token": cached_token,
-            "account_id": "acc_cached_user",
-            "expires_at": "2099-01-01T00:00:00Z",
-        })
-        token_store.save_token(cached_token)
-
-        # Device flow MUST NOT run — patches that raise loudly catch
-        # any regression that re-prompts the user.
-        async def boom_request(_url):
-            raise AssertionError("device_flow.request called despite valid cache")
-
-        async def boom_poll(*args, **kwargs):
-            raise AssertionError("device_flow.poll called despite valid cache")
-
-        monkeypatch.setattr(login_mod.device_flow, "request", boom_request)
-        monkeypatch.setattr(login_mod.device_flow, "poll", boom_poll)
-
-        result = runner.invoke(main, ["login", "--no-start"])
-        assert result.exit_code == 0, result.output
-        assert "Already logged in as acc_cached_user" in result.output
-        assert "--force" in result.output  # hint for explicit re-auth
-
-    def test_login_force_bypasses_cache(self, runner, tmp_path, monkeypatch):
-        """`krewcli login --force` re-runs the device flow even when
-        a valid token exists — used to swap accounts."""
         import jwt as _jwt
         from krewcli.auth import device_flow, token_store
         from krewcli.cli import login as login_mod
 
         monkeypatch.setattr(token_store, "_try_keyring", lambda: None)
         monkeypatch.setattr(token_store, "_DEFAULT_DIR", tmp_path)
-        monkeypatch.setattr(
-            login_mod.supervisor, "_DEFAULT_DIR", tmp_path / ".krewcli",
-        )
 
-        cached_token = _jwt.encode(
-            {"sub": "acc_old", "exp": 9999999999},
+        # Seed a token that the legacy cache check would have reused.
+        stale_token = _jwt.encode(
+            {"sub": "acc_stale", "exp": 9999999999},
             "x", algorithm="HS256",
         )
         token_store.save_record({
-            "token": cached_token,
-            "account_id": "acc_old",
+            "token": stale_token,
+            "account_id": "acc_stale",
             "expires_at": "2099-01-01T00:00:00Z",
         })
+        token_store.save_token(stale_token)
 
-        async def fake_request(_url):
+        request_calls: list = []
+
+        async def fake_request(url):
+            request_calls.append(url)
             return device_flow.DeviceCode(
-                device_code="dc_force",
-                user_code="FRCE-0000",
+                device_code="dc_fresh",
+                user_code="FRSH-0000",
                 verification_uri="x",
                 expires_in=600,
             )
 
         async def fake_poll(_url, _device_code, *, interval=3.0, timeout=600.0):
             return device_flow.DeviceToken(
-                token="jwt-new",
-                account_id="acc_new",
+                token="jwt-fresh",
+                account_id="acc_fresh",
                 expires_at="2099-01-01T00:00:00Z",
             )
 
         monkeypatch.setattr(login_mod.device_flow, "request", fake_request)
         monkeypatch.setattr(login_mod.device_flow, "poll", fake_poll)
 
-        result = runner.invoke(main, ["login", "--force", "--no-start"])
+        result = runner.invoke(main, ["login", "--no-start"])
         assert result.exit_code == 0, result.output
-        assert "Logged in as acc_new" in result.output
+        assert "Logged in as acc_fresh" in result.output
+        assert len(request_calls) == 1, "device_flow.request must run on every login"
 
     def test_login_idempotent_when_daemon_already_running(self, runner, tmp_path, monkeypatch):
         """If a daemon is already running, login skips the bootstrap +

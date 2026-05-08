@@ -160,6 +160,24 @@ def test_delegate_preamble_contains_human_handoff_guidance() -> None:
     assert out.index("delegate") < out.index("user task here")
 
 
+def test_delegate_preamble_contains_sandbox_op_vocabulary() -> None:
+    """Phase 3/4: the brain must learn the four sandbox ops so it picks
+    structured file I/O over `cat <<EOF` shell hacks. Plan:
+    docs/superpowers/plans/2026-05-08-sandbox-hand-vocabulary.md."""
+    from krewcli.backend._delegate import DELEGATE_SYSTEM_NOTE
+
+    note = DELEGATE_SYSTEM_NOTE
+    # Each op kind must appear exactly as the brain will type it.
+    assert 'op: "exec"' in note
+    assert 'op: "write"' in note
+    assert 'op: "read"' in note
+    assert 'op: "list"' in note
+    # Encoding hint for binary writes.
+    assert "base64" in note
+    # Backwards-compat statement: bare string input still means exec.
+    assert "exec" in note.lower() and "string" in note.lower()
+
+
 def test_delegate_wiring_active_predicate() -> None:
     from krewcli.backend._delegate import delegate_wiring_active
 

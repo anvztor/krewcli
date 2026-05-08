@@ -54,6 +54,23 @@ schema: <optional schema>)`. This is the only way to reach the operator; \
 there is no local UI. Failures are values — `delegate` always returns a \
 ResultEnvelope, never raises.
 
+For sandbox targets, `input` is an object with an `op` field that picks \
+the operation to dispatch:
+
+  {op: "exec",  command: "<sh -c command>", cwd?: "<path>", env?: {...}}
+  {op: "write", path: "/abs/path", data: "<text|base64>", encoding?: "utf-8"|"base64"}
+  {op: "read",  path: "/abs/path"}
+  {op: "list",  path: "/abs/path", depth?: 1}
+
+When `op` is omitted (or `input` is a bare string), "exec" is assumed and \
+the string is run via `/bin/sh -c`. Binary file content MUST be base64 — \
+set `encoding: "base64"` on writes and decode `content.data` accordingly \
+when `content.encoding == "base64"` on reads. The MVP cap on a single \
+write is 1 MiB; for larger payloads, fetch from inside the sandbox \
+(e.g. `op: "exec"` with `curl` or `git clone`). Prefer `op: "exec"` for \
+shell pipelines and let `git`, `ls`, `find`, `diff` do their jobs — \
+file ops are best for binary, structured I/O, and pulling artifacts back.
+
 Do NOT use any of these built-in tools — they have no UI in this \
 environment and will time out: `AskUserQuestion`, `request_user_input`, \
 `request_user_question`. Always route human-facing prompts through \

@@ -29,6 +29,11 @@ import logging
 import os
 import shutil
 
+from krewcli.backend._delegate import (
+    delegate_wiring_active,
+    prepend_delegate_preamble,
+    write_gemini_settings,
+)
 from krewcli.backend.protocol import (
     BackendMessage,
     BackendResult,
@@ -79,14 +84,42 @@ async def _run_gemini(
     result_future: asyncio.Future[BackendResult],
 ) -> None:
     """Spawn gemini CLI and stream its output into the queue."""
+    proc_env = {**os.environ, **(extra_env or {})}
+
+    # Per-task delegate wiring (Three Hands Protocol). Gemini's project
+    # MCP config lives at `<cwd>/.gemini/settings.json`; pair it with
+    # `--allowed-mcp-server-names krewcli-bridge` so the CLI surfaces
+    # the bridge's tools even with a strict default policy. Gemini lacks
+    # a system-prompt flag, so the delegate guidance is prepended to
+    # the user prompt with a clear delimiter.
+    final_prompt = prompt
+    extra_args: list[str] = []
+    if delegate_wiring_active(proc_env):
+        try:
+            write_gemini_settings(
+                working_dir,
+                krewhub_url=proc_env.get("KREWHUB_URL", ""),
+                task_id=proc_env.get("KREWHUB_TASK_ID", ""),
+                session_token=proc_env.get("KREWHUB_SESSION_TOKEN", ""),
+                parent_tape_id=proc_env.get("KREWHUB_PARENT_TAPE_ID", ""),
+                bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
+                recipe_id=proc_env.get("KREWHUB_RECIPE_ID", ""),
+            )
+            final_prompt = prepend_delegate_preamble(prompt)
+            extra_args += ["--allowed-mcp-server-names", "krewcli-bridge"]
+        except OSError as exc:
+            logger.warning(
+                "gemini backend: failed to write .gemini/settings.json: "
+                "%s — delegate tool will be unavailable", exc,
+            )
+
     args = [
         "gemini",
-        "-p", prompt,
+        "-p", final_prompt,
         "--output-format", "stream-json",
         "--yolo",
+        *extra_args,
     ]
-
-    proc_env = {**os.environ, **(extra_env or {})}
 
     try:
         process = await asyncio.create_subprocess_exec(

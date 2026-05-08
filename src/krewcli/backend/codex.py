@@ -14,6 +14,11 @@ import os
 import shutil
 from pathlib import Path
 
+from krewcli.backend._delegate import (
+    delegate_wiring_active,
+    prepend_delegate_preamble,
+    write_codex_home,
+)
 from krewcli.backend.protocol import (
     BackendMessage,
     BackendResult,
@@ -23,7 +28,9 @@ from krewcli.backend.protocol import (
 logger = logging.getLogger(__name__)
 
 # Allowlisted host env vars — everything else excluded to prevent
-# stale KREWHUB_* from prior sessions contaminating this run.
+# stale KREWHUB_* from prior sessions contaminating this run. The
+# KREWHUB_* names this backend cares about flow in via `extra_env` from
+# the daemon, not from os.environ.
 _SAFE_HOST_VARS = frozenset({
     "PATH", "HOME", "SHELL", "TERM", "USER", "LANG", "LC_ALL", "LC_CTYPE",
     "TMPDIR", "SSH_AUTH_SOCK", "DISPLAY", "XDG_RUNTIME_DIR",
@@ -69,13 +76,38 @@ async def _run_codex(
 ) -> None:
     """Spawn codex CLI and produce backend messages."""
     safe_env = {k: v for k, v in os.environ.items() if k in _SAFE_HOST_VARS}
-    # Drop CODEX_HOME from extra_env — let codex use its global home.
+    # CODEX_HOME from extra_env is dropped — when delegate wiring is
+    # active we provision a per-task CODEX_HOME below. Otherwise codex
+    # falls back to its own global default (~/.codex).
     filtered_extra = {
         k: v for k, v in (extra_env or {}).items() if k != "CODEX_HOME"
     }
     proc_env = {**safe_env, **filtered_extra}
 
-    args = ["codex", "exec", "--skip-git-repo-check", "--full-auto", prompt]
+    # Per-task delegate wiring (Three Hands Protocol). Mirrors
+    # `claude.py` but routes through `CODEX_HOME/config.toml` because
+    # codex doesn't accept --mcp-config / --append-system-prompt flags.
+    final_prompt = prompt
+    if delegate_wiring_active(proc_env):
+        try:
+            codex_home = write_codex_home(
+                working_dir,
+                krewhub_url=proc_env.get("KREWHUB_URL", ""),
+                task_id=proc_env.get("KREWHUB_TASK_ID", ""),
+                session_token=proc_env.get("KREWHUB_SESSION_TOKEN", ""),
+                parent_tape_id=proc_env.get("KREWHUB_PARENT_TAPE_ID", ""),
+                bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
+                recipe_id=proc_env.get("KREWHUB_RECIPE_ID", ""),
+            )
+            proc_env["CODEX_HOME"] = codex_home
+            final_prompt = prepend_delegate_preamble(prompt)
+        except OSError as exc:
+            logger.warning(
+                "codex backend: failed to provision per-task CODEX_HOME: "
+                "%s — delegate tool will be unavailable", exc,
+            )
+
+    args = ["codex", "exec", "--skip-git-repo-check", "--full-auto", final_prompt]
 
     await queue.put(BackendMessage(
         kind="session_start",
@@ -114,10 +146,12 @@ async def _run_codex(
     stdout_text = stdout_bytes.decode(errors="replace").strip()
     combined = stdout_text or stderr_text
 
-    # Try to extract summary from latest rollout file.
+    # Try to extract summary from latest rollout file. When delegate
+    # wiring set a per-task CODEX_HOME, look there first.
     summary = await _extract_rollout_summary(
         fallback=combined,
         success=success,
+        codex_home=proc_env.get("CODEX_HOME"),
     )
 
     if combined:
@@ -156,10 +190,11 @@ async def _extract_rollout_summary(
     *,
     fallback: str,
     success: bool,
+    codex_home: str | None = None,
 ) -> str:
     """Pull final agent message from the latest codex rollout file."""
-    codex_home = str(Path.home() / ".codex")
-    sessions_dir = Path(codex_home) / "sessions"
+    home = codex_home or str(Path.home() / ".codex")
+    sessions_dir = Path(home) / "sessions"
     if not sessions_dir.exists():
         return _fallback(fallback, success)
 

@@ -13,9 +13,12 @@ import json
 import logging
 import os
 import shutil
-import sys
-from pathlib import Path
 
+from krewcli.backend._delegate import (
+    DELEGATE_SYSTEM_NOTE as _DELEGATE_SYSTEM_NOTE,
+    delegate_wiring_active,
+    write_claude_mcp_config,
+)
 from krewcli.backend.protocol import (
     BackendMessage,
     BackendResult,
@@ -25,49 +28,8 @@ from krewcli.backend.protocol import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# MCP-config + arg helpers (Invocation Contract slice 4)
-# ---------------------------------------------------------------------------
-
-
-def write_mcp_config(
-    workdir: str | Path,
-    *,
-    krewhub_url: str,
-    task_id: str,
-    session_token: str,
-    parent_tape_id: str,
-    bundle_id: str,
-    recipe_id: str,
-) -> str:
-    """Generate the `--mcp-config` JSON file declaring the krewcli-bridge
-    stdio server.
-
-    Same workdir + same task → same file path → idempotent across retries.
-    """
-    workdir = Path(workdir)
-    workdir.mkdir(parents=True, exist_ok=True)
-    config_path = workdir / ".krewcli" / "mcp_config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    body = {
-        "mcpServers": {
-            "krewcli-bridge": {
-                "command": sys.executable or "python",
-                "args": ["-m", "krewcli.mcp_servers.bridge"],
-                "env": {
-                    "KREWHUB_URL": krewhub_url,
-                    "KREWHUB_SESSION_TOKEN": session_token,
-                    "KREWHUB_TASK_ID": task_id,
-                    "KREWHUB_BUNDLE_ID": bundle_id,
-                    "KREWHUB_RECIPE_ID": recipe_id,
-                    "KREWHUB_PARENT_TAPE_ID": parent_tape_id,
-                },
-            }
-        }
-    }
-    config_path.write_text(json.dumps(body, indent=2), encoding="utf-8")
-    return str(config_path)
+# Backwards-compatible alias — older tests import `write_mcp_config`.
+write_mcp_config = write_claude_mcp_config
 
 
 def build_claude_args(
@@ -101,31 +63,6 @@ def build_claude_args(
     args += ["-p", prompt]
     return args
 
-
-_DELEGATE_SYSTEM_NOTE = """\
-You are running headlessly in an e2b sandbox via krewcli. The only way to \
-interact with anything outside your own reasoning context — the human \
-operator, peer agents, or sandbox commands — is through the `delegate` \
-tool exposed by the krewcli-bridge MCP server (named \
-`mcp__krewcli-bridge__delegate`).
-
-  delegate({
-    to: "human" | "sandbox:<id>" | "agent:<id>",
-    input: <string-or-object>,
-    schema?: <MCP-elicitation-subset-schema>,
-    deadline_s?: 300,
-    label?: <short-tag>
-  })
-  → ResultEnvelope { action: "accept"|"decline"|"cancel"|"error",
-                     content?, reason? }
-
-When a task asks you to ask, query, request input from, or otherwise \
-involve the human operator, call `delegate(to: "human", input: <question>, \
-schema: <optional schema>)`. This is the only way to reach the operator; \
-there is no local UI. Failures are values — `delegate` always returns a \
-ResultEnvelope, never raises. The `AskUserQuestion` tool is unavailable in \
-this environment.\
-"""
 
 # asyncio StreamReader buffer — 4 MB to handle large tool results.
 _STREAM_LIMIT = 4 * 1024 * 1024
@@ -176,7 +113,7 @@ async def _run_claude(
     # claude can call the krewcli-bridge `delegate` tool. The execenv
     # surfaces KREWHUB_* vars; we re-use them here.
     mcp_config_path: str | None = None
-    if proc_env.get("KREWHUB_TASK_ID") and proc_env.get("KREWHUB_URL"):
+    if delegate_wiring_active(proc_env):
         try:
             mcp_config_path = write_mcp_config(
                 working_dir,

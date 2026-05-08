@@ -65,9 +65,32 @@ DELEGATE_TOOL_DEF: dict = {
                 ),
             },
             "input": {
+                # Untyped property gets serialized as a JSON string by some
+                # tool-use clients (verified with Claude Sonnet 4.6 on the
+                # 2026-05-08 brain smoke), which makes SandboxHand fall
+                # through to the legacy op:exec path. Declare both shapes
+                # explicitly so the brain emits a real object.
+                "anyOf": [
+                    {
+                        "type": "string",
+                        "description": (
+                            "Bare string. For sandbox: shorthand for "
+                            "{op:'exec', command:<this>}. For human: the "
+                            "question text."
+                        ),
+                    },
+                    {
+                        "type": "object",
+                        "description": (
+                            "Structured input. Sandbox vocabulary: "
+                            "{op:'exec'|'write'|'read'|'list', ...}. "
+                            "Human: {question, schema?}. Agent: {prompt, ...}."
+                        ),
+                    },
+                ],
                 "description": (
-                    "What to send the Hand. String for humans/sandboxes, "
-                    "structured for agents."
+                    "What to send the Hand. Use the object form for "
+                    "structured ops; string is shorthand for op:exec."
                 ),
             },
             "schema": {

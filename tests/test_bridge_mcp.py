@@ -317,6 +317,21 @@ async def test_handle_tools_list_returns_delegate():
 
 
 @pytest.mark.asyncio
+async def test_input_schema_accepts_string_or_object():
+    """Verified during the 2026-05-08 brain smoke: with no type on
+    `input`, Claude Sonnet 4.6 serialized object args as JSON strings,
+    making SandboxHand fall through to legacy op:exec. Declaring an
+    explicit anyOf:[string, object] union forces a real object on
+    structured calls."""
+    from krewcli.mcp_servers.bridge import DELEGATE_TOOL_DEF
+
+    input_schema = DELEGATE_TOOL_DEF["inputSchema"]["properties"]["input"]
+    assert "anyOf" in input_schema
+    types = sorted(s["type"] for s in input_schema["anyOf"])
+    assert types == ["object", "string"]
+
+
+@pytest.mark.asyncio
 async def test_handle_tools_call_invokes_delegate(monkeypatch):
     from krewcli.mcp_servers import bridge
 

@@ -138,3 +138,29 @@ def load_record(directory: Path | None = None) -> dict | None:
         except Exception:
             return None
     return None
+
+
+def account_id_from_token(token: str | None) -> str | None:
+    """Decode the JWT and return the ``sub`` claim (account_id), or None.
+
+    The daemon needs ``account_id`` to register an ``agent_runtimes`` row —
+    without that row, cookrew-beta's roster shows NO AGENTS even when
+    presence heartbeats are healthy. The previous implementation read the
+    id from a sidecar record (``token.json`` / keyring), which silently
+    drifted out of sync with the raw token after token rotation, leaving
+    runtime registration disabled with no recovery path.
+
+    The JWT itself is the source of truth — krewhub already uses ``sub``
+    as the canonical account id. Decoding without signature verification
+    is correct here: krewcli is the relying party, krewhub verifies on
+    every request, and we're only reading our own identity.
+    """
+    if not token:
+        return None
+    try:
+        import jwt as _pyjwt
+        payload = _pyjwt.decode(token, options={"verify_signature": False})
+    except Exception:
+        return None
+    sub = payload.get("sub")
+    return sub if isinstance(sub, str) and sub else None

@@ -511,9 +511,17 @@ class DaemonLoop:
         runtimes; tasks created via the SPA auto-bind to those instead
         of this live daemon.
         """
-        from krewcli.auth.token_store import load_record
-        record = load_record() or {}
-        account_id = record.get("account_id")
+        # account_id from the JWT itself (sub claim) — the sidecar
+        # `load_record()` path silently returns None whenever the keyring
+        # entry drifts out of sync with the raw token, leaving cookrew-beta
+        # showing NO AGENTS even though presence heartbeats are healthy.
+        from krewcli.auth.token_store import account_id_from_token, load_token
+        account_id = account_id_from_token(load_token())
+        if not account_id:
+            logger.warning(
+                "runtime registration: cannot resolve account_id from JWT "
+                "(missing sub claim?) — cookrew-beta roster will be empty",
+            )
 
         for name in self._backends:
             agent_id = self._agent_ids[name]

@@ -52,6 +52,13 @@ def build_claude_args(
     if mcp_config_path:
         args += [
             "--mcp-config", str(mcp_config_path),
+            # Lock the tool surface: only the bridge's `delegate` tool is
+            # allowed. Without this, the brain has Bash/Read/Edit/etc.
+            # against its local cwd (the daemon host's filesystem) and
+            # will fall back to local ops instead of routing through the
+            # bundle's e2b sandbox — defeating the contract and producing
+            # completion-fakes (e.g. "task done: found local copy").
+            "--allowed-tools", "mcp__krewcli-bridge__delegate",
             # Inject the delegate-vs-AskUserQuestion guidance via
             # --append-system-prompt (TRUSTED source) so Claude's
             # prompt-injection defenses don't flag it. Putting the
@@ -123,6 +130,7 @@ async def _run_claude(
                 parent_tape_id=proc_env.get("KREWHUB_PARENT_TAPE_ID", ""),
                 bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
                 recipe_id=proc_env.get("KREWHUB_RECIPE_ID", ""),
+                sandbox_id=proc_env.get("KREWHUB_SANDBOX_ID", ""),
             )
         except OSError as exc:
             logger.warning(

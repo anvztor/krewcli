@@ -178,6 +178,65 @@ def test_delegate_preamble_contains_sandbox_op_vocabulary() -> None:
     assert "exec" in note.lower() and "string" in note.lower()
 
 
+def test_delegate_preamble_promises_bare_sandbox_target() -> None:
+    """Brain should not need to know its sandbox id — bare `to: "sandbox"`
+    routes to the bundle's attached VM via bridge auto-resolution. The
+    note must teach this explicitly so the brain doesn't ask the operator
+    or fall back to local Bash (the failure mode the cookrew-beta task
+    surfaced on 2026-05-09)."""
+    from krewcli.backend._delegate import DELEGATE_SYSTEM_NOTE
+
+    note = DELEGATE_SYSTEM_NOTE
+    # The bare-form target: THE message that fixes the bug where the
+    # brain asked the human "what's my sandbox id?".
+    assert 'to: "sandbox"' in note
+    # And brain should be told delegate is the only tool — closes the
+    # local-Bash escape hatch in the note layer (the actual lock-down
+    # is via --allowed-tools in build_claude_args).
+    note_lower = note.lower()
+    assert "only" in note_lower and "delegate" in note_lower
+
+
+def test_bridge_env_includes_sandbox_id_when_set(tmp_path: Path) -> None:
+    """write_claude_mcp_config must surface KREWHUB_SANDBOX_ID to the
+    bridge subprocess so it can auto-resolve `to: "sandbox"`."""
+    from krewcli.backend._delegate import write_claude_mcp_config
+
+    config_path = write_claude_mcp_config(
+        tmp_path,
+        krewhub_url="http://krewhub:8420",
+        task_id="task_1",
+        session_token="tok",
+        parent_tape_id="tape",
+        bundle_id="bun_42",
+        recipe_id="rec_99",
+        sandbox_id="sbx_attached_to_bundle",
+    )
+    body = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    bridge_env = body["mcpServers"]["krewcli-bridge"]["env"]
+    assert bridge_env.get("KREWHUB_SANDBOX_ID") == "sbx_attached_to_bundle"
+
+
+def test_bridge_env_omits_sandbox_id_when_unset(tmp_path: Path) -> None:
+    """When the bundle has no sandbox, the env var should be absent
+    rather than empty so the bridge surfaces a clear no_sandbox_attached
+    error instead of trying to call krewhub with an empty id."""
+    from krewcli.backend._delegate import write_claude_mcp_config
+
+    config_path = write_claude_mcp_config(
+        tmp_path,
+        krewhub_url="http://krewhub:8420",
+        task_id="task_1",
+        session_token="tok",
+        parent_tape_id="tape",
+        bundle_id="bun_42",
+        recipe_id="rec_99",
+    )
+    body = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    bridge_env = body["mcpServers"]["krewcli-bridge"]["env"]
+    assert "KREWHUB_SANDBOX_ID" not in bridge_env
+
+
 def test_delegate_wiring_active_predicate() -> None:
     from krewcli.backend._delegate import delegate_wiring_active
 

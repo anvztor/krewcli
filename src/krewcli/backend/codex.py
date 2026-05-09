@@ -98,6 +98,7 @@ async def _run_codex(
                 parent_tape_id=proc_env.get("KREWHUB_PARENT_TAPE_ID", ""),
                 bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
                 recipe_id=proc_env.get("KREWHUB_RECIPE_ID", ""),
+                sandbox_id=proc_env.get("KREWHUB_SANDBOX_ID", ""),
             )
             proc_env["CODEX_HOME"] = codex_home
             final_prompt = prepend_delegate_preamble(prompt)

@@ -32,14 +32,15 @@ from pathlib import Path
 
 
 DELEGATE_SYSTEM_NOTE = """\
-You are running headlessly in an e2b sandbox via krewcli. The only way to \
-interact with anything outside your own reasoning context — the human \
-operator, peer agents, or sandbox commands — is through the `delegate` \
-tool exposed by the krewcli-bridge MCP server (named \
-`mcp__krewcli-bridge__delegate`).
+You are running headlessly under krewcli. Your bundle has an attached \
+e2b sandbox — use it for all file, exec, and code operations. Your only \
+external tool is `delegate` (exposed as `mcp__krewcli-bridge__delegate`); \
+Bash, Read, Edit, Write, Glob, Grep, WebFetch, etc. are NOT available, \
+and any task that requires them MUST be expressed via `delegate(to: \
+"sandbox", ...)`.
 
   delegate({
-    to: "human" | "sandbox:<id>" | "agent:<id>",
+    to: "sandbox" | "human" | "agent:<id>",
     input: <string-or-object>,
     schema?: <MCP-elicitation-subset-schema>,
     deadline_s?: 300,
@@ -47,6 +48,11 @@ tool exposed by the krewcli-bridge MCP server (named \
   })
   → ResultEnvelope { action: "accept"|"decline"|"cancel"|"error",
                      content?, reason? }
+
+`to: "sandbox"` (bare, no id) routes to the e2b sandbox attached to \
+your bundle. The bridge auto-resolves the id from the spawn env — you \
+do NOT need to know the sandbox id. To target a specific sandbox you \
+already know about, use `to: "sandbox:<sbx_id>"`.
 
 When a task asks you to ask, query, request input from, or otherwise \
 involve the human operator, call `delegate(to: "human", input: <question>, \
@@ -91,8 +97,9 @@ def _bridge_env(
     parent_tape_id: str,
     bundle_id: str,
     recipe_id: str,
+    sandbox_id: str = "",
 ) -> dict[str, str]:
-    return {
+    env = {
         "KREWHUB_URL": krewhub_url,
         "KREWHUB_SESSION_TOKEN": session_token,
         "KREWHUB_TASK_ID": task_id,
@@ -100,6 +107,12 @@ def _bridge_env(
         "KREWHUB_RECIPE_ID": recipe_id,
         "KREWHUB_PARENT_TAPE_ID": parent_tape_id,
     }
+    # The bridge reads KREWHUB_SANDBOX_ID to auto-resolve bare
+    # `delegate(to: "sandbox", ...)`; without it that target errors with
+    # `no_sandbox_attached`.
+    if sandbox_id:
+        env["KREWHUB_SANDBOX_ID"] = sandbox_id
+    return env
 
 
 def _bridge_command_args() -> tuple[str, list[str]]:
@@ -120,6 +133,7 @@ def write_claude_mcp_config(
     parent_tape_id: str,
     bundle_id: str,
     recipe_id: str,
+    sandbox_id: str = "",
 ) -> str:
     """Generate the JSON `--mcp-config` file claude expects.
 
@@ -143,6 +157,7 @@ def write_claude_mcp_config(
                     parent_tape_id=parent_tape_id,
                     bundle_id=bundle_id,
                     recipe_id=recipe_id,
+                    sandbox_id=sandbox_id,
                 ),
             }
         }
@@ -160,6 +175,7 @@ def write_codex_home(
     parent_tape_id: str,
     bundle_id: str,
     recipe_id: str,
+    sandbox_id: str = "",
 ) -> str:
     """Build a per-task `CODEX_HOME` and write `config.toml` declaring
     the krewcli-bridge MCP server.
@@ -204,6 +220,7 @@ def write_codex_home(
         parent_tape_id=parent_tape_id,
         bundle_id=bundle_id,
         recipe_id=recipe_id,
+        sandbox_id=sandbox_id,
     )
 
     lines: list[str] = []
@@ -225,6 +242,7 @@ def write_gemini_settings(
     parent_tape_id: str,
     bundle_id: str,
     recipe_id: str,
+    sandbox_id: str = "",
 ) -> str:
     """Write `.gemini/settings.json` (project scope) declaring the
     krewcli-bridge MCP server. Returns the path to the settings dir.
@@ -254,6 +272,7 @@ def write_gemini_settings(
                     parent_tape_id=parent_tape_id,
                     bundle_id=bundle_id,
                     recipe_id=recipe_id,
+                    sandbox_id=sandbox_id,
                 ),
                 "trust": True,
             }

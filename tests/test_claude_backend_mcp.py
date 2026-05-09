@@ -42,6 +42,13 @@ async def test_build_claude_args_includes_mcp_config(tmp_path):
     assert "--disallowedTools" in args
     disallow_idx = args.index("--disallowedTools")
     assert "AskUserQuestion" in args[disallow_idx + 1]
+    # Tool surface is locked: ONLY mcp__krewcli-bridge__delegate is
+    # allowed. Without this, the brain falls back to local Bash against
+    # the daemon host's filesystem (the cookrew-beta task failure on
+    # 2026-05-09 — agent found a local checkout and lied "task done").
+    assert "--allowed-tools" in args
+    allowed_idx = args.index("--allowed-tools")
+    assert args[allowed_idx + 1] == "mcp__krewcli-bridge__delegate"
     assert "-p" in args
     assert "do the thing" in args
 

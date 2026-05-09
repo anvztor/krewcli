@@ -21,20 +21,24 @@ logger = logging.getLogger(__name__)
 _DELEGATE_INSTRUCTIONS = """\
 # Delegating work outside your reasoning context
 
-When you need to do anything outside the model itself — run a shell
-command in this sandbox, ask the human operator a question, or hand
-work off to a peer agent — call the `delegate` tool exposed by the
-krewcli-bridge MCP server (registered as `mcp__krewcli-bridge__delegate`).
+The `delegate` tool exposed by the krewcli-bridge MCP server (registered
+as `mcp__krewcli-bridge__delegate`) is your ONLY way to act outside the
+model. It is the only tool you have — Bash, Read, Edit, etc. are
+unavailable.
 
 ```
 delegate({
-  to: "sandbox:<id>" | "human" | "agent:<id>",
+  to: "sandbox" | "human" | "agent:<id>",
   input: <string-or-object>,
   schema: <optional-MCP-elicitation-subset-schema>,
   deadline_s: <optional-int, default 300>,
   label:   <optional-display-tag>
 })
 ```
+
+`to: "sandbox"` (bare, no id) routes to the e2b sandbox attached to
+this bundle — the bridge auto-resolves the id from the spawn env.
+You don't need to know the sandbox id; just say `to: "sandbox"`.
 
 The tool returns a `ResultEnvelope`:
   `{action: "accept"|"decline"|"cancel"|"error", content?, reason?}`
@@ -166,6 +170,12 @@ class ExecutionEnvironment:
             "KREWHUB_REPO_URL": self._repo_url,
             "KREWHUB_BRANCH": self._branch,
         }
+        # Surface the bundle's e2b sandbox id so the bridge MCP server can
+        # auto-resolve `delegate(to: "sandbox", ...)` to the correct VM.
+        # Without this the brain has to ask the operator what its sandbox
+        # is — see krewcli-bridge `delegate` impl.
+        if self._sandbox_id:
+            env["KREWHUB_SANDBOX_ID"] = self._sandbox_id
         if krewhub_url:
             env["KREWHUB_URL"] = krewhub_url
         if session_token:
@@ -191,6 +201,7 @@ class ExecutionEnvironment:
             task_meta = {
                 "task_id": self._task_id,
                 "bundle_id": self._bundle_id,
+                "sandbox_id": self._sandbox_id,
                 "title": task_title,
                 "description": task_description,
                 "repo_url": self._repo_url,

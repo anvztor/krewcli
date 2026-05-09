@@ -397,3 +397,114 @@ async def test_notification_is_silent():
         "method": "notifications/initialized",
     })
     assert resp is None
+
+
+# ---------------------------------------------------------------------------
+# Bare `to: "sandbox"` auto-resolution (cookrew-beta task fix, 2026-05-09)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bare_sandbox_target_resolves_via_env(monkeypatch):
+    """Brain says `to: "sandbox"` (no id); bridge fills in the bundle's
+    sandbox id from KREWHUB_SANDBOX_ID and forwards a normal target."""
+    from krewcli.mcp_servers import bridge
+
+    posted: list[dict] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+        def json(self): return self._body
+        @property
+        def text(self): return json.dumps(self._body)
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            posted.append({"url": url, "json": json})
+            return FakeResponse(200, {"invocation_id": "inv_x"})
+        async def get(self, url, headers=None, params=None):
+            return FakeResponse(200, {"events": [
+                {"id": 0, "kind": "done", "payload": {
+                    "result": {"action": "accept", "content": None, "reason": None},
+                }}
+            ], "next_after": 0})
+
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SANDBOX_ID", "sbx_bundle_attached")
+
+    result = await bridge.delegate({
+        "to": "sandbox",
+        "input": {"op": "exec", "command": "echo hi"},
+    })
+
+    assert result["action"] == "accept"
+    assert posted[0]["json"]["target"] == "sandbox:sbx_bundle_attached"
+
+
+@pytest.mark.asyncio
+async def test_bare_sandbox_target_errors_when_no_attachment(monkeypatch):
+    """If `KREWHUB_SANDBOX_ID` isn't set, bare `to: "sandbox"` returns a
+    structured error envelope so the brain can route through human or
+    surface the gap — not a vague network failure."""
+    from krewcli.mcp_servers import bridge
+
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.delenv("KREWHUB_SANDBOX_ID", raising=False)
+
+    result = await bridge.delegate({
+        "to": "sandbox",
+        "input": {"op": "exec", "command": "x"},
+    })
+
+    assert result["action"] == "error"
+    assert "no_sandbox_attached" in (result.get("reason") or "")
+
+
+@pytest.mark.asyncio
+async def test_explicit_sandbox_id_passes_through_unchanged(monkeypatch):
+    """`to: "sandbox:<explicit_id>"` must NOT be rewritten by the auto-
+    resolver — the brain may have a reason to target a specific VM
+    other than its bundle's default."""
+    from krewcli.mcp_servers import bridge
+
+    posted: list[dict] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+        def json(self): return self._body
+        @property
+        def text(self): return json.dumps(self._body)
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None, headers=None):
+            posted.append({"url": url, "json": json})
+            return FakeResponse(200, {"invocation_id": "inv_x"})
+        async def get(self, url, headers=None, params=None):
+            return FakeResponse(200, {"events": [
+                {"id": 0, "kind": "done", "payload": {
+                    "result": {"action": "accept", "content": None, "reason": None},
+                }}
+            ], "next_after": 0})
+
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SANDBOX_ID", "sbx_bundle_default")
+
+    await bridge.delegate({
+        "to": "sandbox:sbx_explicit_other",
+        "input": {"op": "list", "path": "/"},
+    })
+
+    # Explicit id wins; auto-resolution did not fire.
+    assert posted[0]["json"]["target"] == "sandbox:sbx_explicit_other"

@@ -60,7 +60,9 @@ DELEGATE_TOOL_DEF: dict = {
             "to": {
                 "type": "string",
                 "description": (
-                    "Target. One of: 'sandbox:<sandbox_id>', 'human', "
+                    "Target. One of: 'sandbox' (auto-resolves to the "
+                    "bundle's attached sandbox via KREWHUB_SANDBOX_ID), "
+                    "'sandbox:<sandbox_id>' (explicit), 'human', "
                     "'agent:<agent_id>'."
                 ),
             },
@@ -173,13 +175,31 @@ async def delegate(args: dict) -> dict:
             "reason": "bridge_misconfig: KREWHUB_URL unset",
         }
 
+    # Auto-resolve bare `to: "sandbox"` to the bundle's attached e2b
+    # sandbox. The brain shouldn't need to know its own substrate id;
+    # KREWHUB_SANDBOX_ID is set by the daemon's exec env when the bundle
+    # has a sandbox. Explicit `to: "sandbox:<id>"` is passed through.
+    target = args.get("to", "")
+    if target == "sandbox":
+        sandbox_id = os.environ.get("KREWHUB_SANDBOX_ID", "").strip()
+        if not sandbox_id:
+            return {
+                "action": "error", "content": None,
+                "reason": (
+                    "no_sandbox_attached: this bundle has no sandbox "
+                    "(KREWHUB_SANDBOX_ID unset). Ask the operator to "
+                    "provision one or use `to: \"human\"` instead."
+                ),
+            }
+        target = f"sandbox:{sandbox_id}"
+
     parent_tape_id = (
         args.get("parent_tape_id")
         or os.environ.get("KREWHUB_PARENT_TAPE_ID")
         or ""
     )
     body: dict = {
-        "target": args["to"],
+        "target": target,
         "input": args["input"],
     }
     if "schema" in args:

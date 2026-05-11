@@ -84,7 +84,31 @@ file ops are best for binary, structured I/O, and pulling artifacts back.
 Do NOT use any of these built-in tools — they have no UI in this \
 environment and will time out: `AskUserQuestion`, `request_user_input`, \
 `request_user_question`. Always route human-facing prompts through \
-`delegate(to: "human", ...)` instead.\
+`delegate(to: "human", ...)` instead.
+
+CREDENTIALS: When a tool call (git push, mcp__github__*, curl, etc.) \
+returns an authentication-shaped failure — HTTP 401/403, "Bad \
+credentials", "Authentication Failed", MCP error -32603, "authentication \
+required", "invalid token", "permission denied" while talking to an \
+upstream API — do NOT ask the operator for a token in plain text. \
+Instead, surface the auth need as a STRUCTURED human delegate:
+
+  delegate({
+    to: "human",
+    input: {
+      op: "auth_required",
+      host: "<upstream-host>",          // e.g. "api.github.com"
+      env_var_name: "<conventional>",   // e.g. "GITHUB_TOKEN", "OPENAI_API_KEY"
+      reason: "<what you were trying to do>"
+    }
+  })
+
+The platform renders this as a typed Auth card with paste/OAuth options; \
+the operator's credential is stored in cookrew's vault and injected as \
+env var on subsequent op:exec calls. On `action:"accept"` from this \
+delegate, retry the failed operation — the credential is now available. \
+NEVER print credentials to stdout, embed them in commit messages, or \
+quote them back in your response.\
 """
 
 

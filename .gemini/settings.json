@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "krewcli-bridge": {
+      "command": "/Users/drej/workspace/krew-dev/krewcli/.venv/bin/python3",
+      "args": [
+        "-m",
+        "krewcli.mcp_servers.bridge"
+      ],
+      "env": {
+        "KREWHUB_URL": "https://hub.cookrew.dev",
+        "KREWHUB_SESSION_TOKEN": "eyJhbGciOiJFUzI1NiIsImtpZCI6IjNiZjFjZDIxIiwidHlwIjoiSldUIn0.eyJpc3MiOiJrcmV3YXV0aCIsInN1YiI6ImFjY19jNjFkZGE2NTI2MTAiLCJzaWQiOiJzZXNfOWFiYTljNWJlNTc0IiwiaWF0IjoxNzc4NDY5ODQ2LCJleHAiOjE3Nzg1NTYyNDYsIm1ldGhvZCI6ImRldmljZSIsInVzZXJuYW1lIjoia3JldyJ9.uWb3x_se55X5d78c71A3GvzEZ45M7qliATkYRnsagbwqMAKCZ8FqJpw_676uNyvKQAb1nj_rtcS3ThUdra6DKw",
+        "KREWHUB_TASK_ID": "task_ac8f0c1a",
+        "KREWHUB_BUNDLE_ID": "bun_recov_1778468880",
+        "KREWHUB_RECIPE_ID": "rec_1ed0e917",
+        "KREWHUB_PARENT_TAPE_ID": ""
+      },
+      "trust": true
+    }
+  }
+}

@@ -106,7 +106,7 @@ class _FakeExecEnv:
     async def teardown(self) -> None:
         self.teardown_called = True
 
-    def build_env(self, recipe_id: str = "", extra=None) -> dict[str, str]:
+    def build_env(self, recipe_id: str = "", krewhub_url: str = "", session_token: str = "", extra=None) -> dict[str, str]:
         return dict(self._env)
 
 

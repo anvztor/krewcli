@@ -50,9 +50,13 @@ and any task that requires them MUST be expressed via `delegate(to: \
                      content?, reason? }
 
 `to: "sandbox"` (bare, no id) routes to the e2b sandbox attached to \
-your bundle. The bridge auto-resolves the id from the spawn env — you \
-do NOT need to know the sandbox id. To target a specific sandbox you \
-already know about, use `to: "sandbox:<sbx_id>"`.
+your bundle. The platform handles substrate lifecycle end-to-end — \
+the sandbox is provisioned (or re-provisioned, if it died) automatically \
+on every call, so you can rely on `to: "sandbox"` always working. You \
+NEVER need to know a sandbox id, ask the operator about sandbox state, \
+or surface "no sandbox" issues — those are platform concerns, not your \
+concern. To target a specific sandbox you already know about by id, \
+use `to: "sandbox:<sbx_id>"`.
 
 When a task asks you to ask, query, request input from, or otherwise \
 involve the human operator, call `delegate(to: "human", input: <question>, \

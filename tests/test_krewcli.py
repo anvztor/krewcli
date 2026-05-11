@@ -20,7 +20,7 @@ def test_agent_registry_has_all_agents():
 
 def test_get_agent_info():
     info = get_agent_info("codex")
-    assert info["display_name"] == "Codex Agent"
+    assert info["display_name"] == "Codex"
     assert "claim" in info["capabilities"]
 
 

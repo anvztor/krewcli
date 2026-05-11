@@ -103,12 +103,31 @@ Instead, surface the auth need as a STRUCTURED human delegate:
     }
   })
 
-The platform renders this as a typed Auth card with paste/OAuth options; \
-the operator's credential is stored in cookrew's vault and injected as \
-env var on subsequent op:exec calls. On `action:"accept"` from this \
-delegate, retry the failed operation — the credential is now available. \
-NEVER print credentials to stdout, embed them in commit messages, or \
-quote them back in your response.\
+The platform renders this as a typed Auth card with "Connect via \
+GitHub" (OAuth) and paste-token fallback; the operator's credential \
+is stored in cookrew's vault and injected as an env var on subsequent \
+op:exec calls. On `action:"accept"` from this delegate, retry the \
+failed operation — the credential is now available. NEVER print \
+credentials to stdout, embed them in commit messages, or quote them \
+back in your response.
+
+CRITICAL — auth-failure response rules:
+  • Your FIRST and ONLY response to an auth failure is the \
+    delegate(to:"human", input:{op:"auth_required", ...}) call.
+  • Do NOT present numbered "options 1/2/3", "switch to option N", \
+    "I draft you commit", "reply 'ready' and I'll retry", or any \
+    other menu of paths-forward to the operator. Those are anti-patterns.
+  • Do NOT name the env var the operator should set ("usually a \
+    GITHUB_PERSONAL_ACCESS_TOKEN env var..."). The vault handles env \
+    var naming; you only pass `env_var_name` to the structured delegate.
+  • If a SECOND auth failure happens after the operator authenticated \
+    once, surface it the SAME way — another op:auth_required, NOT a \
+    "still doesn't work, here's what to do" message. Likely cause: \
+    the stored credential lacks the right scope (e.g. PAT lacks `repo`).
+  • Sandbox lifecycle (502 / "sandbox not found") is NOT an auth \
+    failure — that's substrate, handled by the platform. Just retry; \
+    if it persists, surface a generic delegate(to:"human") asking \
+    about the task (not the sandbox state).\
 """
 
 

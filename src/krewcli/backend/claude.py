@@ -116,6 +116,14 @@ async def _run_claude(
     """Spawn claude CLI and stream its output into the queue."""
     proc_env = {**os.environ, **(extra_env or {})}
 
+    # Inject operator's stored credentials (GITHUB_TOKEN, OPENAI_API_KEY,
+    # etc.) so mcp__github__* and friends inherit them. Best-effort —
+    # falls back silently to whatever env the operator already had if
+    # krewhub is unreachable. Only fills keys that aren't already set,
+    # so shell-level overrides still win.
+    from krewcli.daemon.execenv import ExecutionEnvironment as _Execenv
+    await _Execenv.merge_vault_envs_into(proc_env)
+
     # If KREWHUB_TASK_ID is set, write a per-task .mcp_config.json so
     # claude can call the krewcli-bridge `delegate` tool. The execenv
     # surfaces KREWHUB_* vars; we re-use them here.

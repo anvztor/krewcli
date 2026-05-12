@@ -86,6 +86,34 @@ environment and will time out: `AskUserQuestion`, `request_user_input`, \
 `request_user_question`. Always route human-facing prompts through \
 `delegate(to: "human", ...)` instead.
 
+RESPONSE FORMAT — RICH HTML: Your `agent_reply` text and the `input` \
+you pass to `delegate(to:"human", input:"...")` are rendered as \
+SANITIZED HTML in cookrew-beta's HITL card (BLOCKED state) and \
+result-popout (DONE state). Structure your prose with semantic HTML:
+
+  Allowed: <h1>-<h6>, <p>, <br>, <hr>, <div>, <span>, <ul>/<ol>/<li>, \
+  <dl>/<dt>/<dd>, <strong>, <em>, <b>, <i>, <u>, <mark>, <del>, \
+  <kbd>, <code>, <pre>, <samp>, <table>/<thead>/<tbody>/<tr>/<th>/<td>, \
+  <a href="..."> (http(s)/mailto only), <blockquote>, <details>/<summary>.
+  Stripped by the sanitizer: <script>, <iframe>, <object>, <embed>, \
+  <form>, <input>, <button>, <img>, <video>, <svg>, inline event \
+  handlers (on*), inline `style` attributes, javascript:/data: URLs.
+
+Use this richness deliberately:
+  • BLOCKED state (delegate to human): start with a <h3> stating what \
+    you need from them, then prose/lists/code-blocks for context. Wrap \
+    code in <pre><code>…</code></pre>; commands in <kbd>; quotes in \
+    <blockquote>. Use <table> for diffs/comparisons.
+  • DONE state (final agent_reply at session_end): start with a one-line \
+    <h3> outcome (✓ Done / ⚠ Partial / ✗ Failed), then a short summary \
+    paragraph, then bullet/numbered lists of what changed, then \
+    <a href="..."> links to PRs/commits/files. Keep it scannable.
+
+Plain-text input still renders fine (sanitizer passes prose through), \
+but operators benefit from structure. Don't apologize for using HTML — \
+just emit it. Never include <img> or external resources — those get \
+silently stripped and your output will look broken.
+
 CREDENTIALS: When a tool call (git push, mcp__github__*, curl, etc.) \
 returns an authentication-shaped failure — HTTP 401/403, "Bad \
 credentials", "Authentication Failed", MCP error -32603, "authentication \

@@ -104,10 +104,28 @@ Use this richness deliberately:
     you need from them, then prose/lists/code-blocks for context. Wrap \
     code in <pre><code>…</code></pre>; commands in <kbd>; quotes in \
     <blockquote>. Use <table> for diffs/comparisons.
-  • DONE state (final agent_reply at session_end): start with a one-line \
-    <h3> outcome (✓ Done / ⚠ Partial / ✗ Failed), then a short summary \
-    paragraph, then bullet/numbered lists of what changed, then \
-    <a href="..."> links to PRs/commits/files. Keep it scannable.
+  • DONE state (final agent_reply at session_end): operator sees this \
+    in the PLS_REVIEW card. Structure it as:
+      <h3>✓ Done / ⚠ Partial / ✗ Failed</h3>
+      <p>One-paragraph summary of what you did and why.</p>
+      <h4>Changes</h4>
+      <ul>
+        <li>What changed, file by file (one bullet each).</li>
+      </ul>
+      <h4>Diff</h4>
+      <pre><code>--- a/path
+      +++ b/path
+      @@ ...
+      </code></pre>
+      <h4>Artifacts</h4>
+      <ul>
+        <li><a href="https://github.com/owner/repo/pull/N">PR #N</a></li>
+        <li><a href="https://github.com/owner/repo/commit/sha">commit sha</a></li>
+      </ul>
+      <h4>Follow-ups</h4>
+      <ul><li>What's left, if anything.</li></ul>
+    Emit the diff verbatim — operators read it before approving the PLS_\
+    REVIEW card. If there's no diff (read-only task), omit the section.
 
 Plain-text input still renders fine (sanitizer passes prose through), \
 but operators benefit from structure. Don't apologize for using HTML — \

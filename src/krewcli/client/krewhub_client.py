@@ -240,6 +240,31 @@ class KrewHubClient:
         data = await self.get_bundle(bundle_id)
         return data.get("events", [])
 
+    async def get_task_events(
+        self,
+        task_id: str,
+        *,
+        limit: int = 400,
+    ) -> list[dict[str, Any]]:
+        """Fetch the historical event tape for a task (oldest-first).
+
+        Used by the brain to build conversational context — prior
+        agent_reply / human_followup turns are stitched into the
+        prompt so re-claims after a follow-up don't start fresh.
+        Returns [] on transport errors so callers can fall back to
+        the legacy single-shot prompt.
+        """
+        try:
+            resp = await self._client.get(
+                f"/api/v1/tasks/{task_id}/events",
+                params={"limit": limit},
+            )
+            resp.raise_for_status()
+        except Exception:
+            return []
+        body = resp.json()
+        return body.get("events", []) if isinstance(body, dict) else []
+
     async def claim_task(self, task_id: str, agent_id: str) -> dict[str, Any]:
         resp = await self._client.post(
             f"/api/v1/tasks/{task_id}/claim",

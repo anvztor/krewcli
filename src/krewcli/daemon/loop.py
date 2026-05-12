@@ -280,13 +280,19 @@ class DaemonLoop:
         except Exception:
             task_detail = {}
 
-        # If prompt is empty, use the task description
+        # If prompt is empty, build one — conversation-aware, so a
+        # re-invocation after a human follow-up threads the prior
+        # dialog into the prompt instead of restarting from zero.
         if not prompt.strip():
-            prompt = _build_prompt({
-                "title": task_detail.get("title", ""),
-                "description": task_detail.get("description", ""),
-                "bundle_prompt": prompt,
-            })
+            prompt = await _build_prompt_with_context(
+                {
+                    "id": task_id,
+                    "title": task_detail.get("title", ""),
+                    "description": task_detail.get("description", ""),
+                    "bundle_prompt": prompt,
+                },
+                self._client,
+            )
 
         self._running_tasks.add(task_id)
         try:
@@ -413,7 +419,10 @@ class DaemonLoop:
     ) -> None:
         task_id = task["id"]
         try:
-            prompt = _build_prompt(task)
+            # Build a conversation-aware prompt so re-claims after a
+            # human follow-up thread prior dialog turns into the
+            # brain's input — required for continual conversation.
+            prompt = await _build_prompt_with_context(task, self._client)
             result = await self._execute_task(
                 backend_name=backend_name,
                 agent_id=agent_id,
@@ -655,7 +664,13 @@ class DaemonLoop:
 
 
 def _build_prompt(task: dict) -> str:
-    """Build the agent prompt from task metadata."""
+    """Build the agent prompt from task metadata (legacy single-shot).
+
+    Used as a fallback when the conversation-aware builder cannot fetch
+    prior events. New callers should prefer ``_build_prompt_with_context``
+    so re-claims after a follow-up carry the prior turns and the brain
+    can keep continuity.
+    """
     parts: list[str] = []
     title = task.get("title", "")
     if title:
@@ -667,3 +682,99 @@ def _build_prompt(task: dict) -> str:
     if bundle_prompt:
         parts.append(f"\n## Context\n{bundle_prompt}")
     return "\n".join(parts) if parts else "Complete the assigned task."
+
+
+def _extract_dialog_text(event: dict) -> str:
+    """Pull the speakable text out of a tape event (payload.text preferred)."""
+    payload = event.get("payload") or {}
+    if isinstance(payload, dict):
+        pt = payload.get("text")
+        if isinstance(pt, str) and pt.strip():
+            return pt
+    body = event.get("body") or ""
+    return body if isinstance(body, str) else ""
+
+
+async def _build_prompt_with_context(task: dict, client) -> str:
+    """Build a conversation-aware prompt for a task re-claim.
+
+    Walks the task's event tape and threads the prior HUMAN/ASSISTANT
+    turns into the prompt so the brain doesn't start from zero on every
+    follow-up. The latest HUMAN turn is the request to respond to.
+
+    Tape mapping (per `events` schema + `human_followup` workaround):
+      - actor_type=human   + type=agent_reply  → HUMAN turn (operator)
+      - actor_type=agent   + type=agent_reply  → ASSISTANT turn
+      - other types (thinking/tool_*/milestone/session_*) skipped — too
+        noisy and would saturate context with brain-internal trace.
+
+    Falls back to ``_build_prompt`` when:
+      - the tape is empty (fresh task, no prior turns)
+      - the tape has zero dialog turns (only milestones / sessions)
+      - the client fetch failed (network/auth)
+    """
+    task_id = task.get("id", "")
+    if not task_id:
+        return _build_prompt(task)
+
+    events: list[dict] = []
+    try:
+        events = await client.get_task_events(task_id, limit=400)
+    except Exception:
+        logger.warning(
+            "loop: failed to fetch tape for task %s; falling back to single-shot prompt",
+            task_id,
+            exc_info=True,
+        )
+        events = []
+
+    # Walk events oldest-first, accumulating (role, text) turns.
+    turns: list[tuple[str, str]] = []
+    bundle_prompt = task.get("bundle_prompt", "")
+    if bundle_prompt:
+        turns.append(("HUMAN", bundle_prompt))
+
+    for ev in events:
+        if ev.get("type") != "agent_reply":
+            continue
+        actor_type = ev.get("actor_type")
+        text = _extract_dialog_text(ev).strip()
+        if not text:
+            continue
+        role = "HUMAN" if actor_type == "human" else "ASSISTANT"
+        # Dedup: if the first agent run echoed back bundle_prompt as a
+        # bare HUMAN line, skip the duplicate.
+        if turns and turns[-1] == (role, text):
+            continue
+        turns.append((role, text))
+
+    # No conversation history at all → legacy prompt is appropriate.
+    if len(turns) <= 1:
+        return _build_prompt(task)
+
+    parts: list[str] = []
+    title = task.get("title", "")
+    if title:
+        parts.append(f"# Task: {title}")
+    description = task.get("description", "")
+    if description:
+        parts.append(f"\n{description}")
+
+    # The last HUMAN turn is what the brain must answer; everything
+    # before is context. If the LAST turn happens to be ASSISTANT
+    # (which would be unusual on a re-claim), still surface the
+    # transcript so the brain can continue coherently.
+    if turns[-1][0] != "HUMAN":
+        logger.debug(
+            "loop: task %s tape ends on %s, brain will continue freely",
+            task_id, turns[-1][0],
+        )
+
+    parts.append("\n## Conversation so far\n")
+    for role, text in turns[:-1]:
+        parts.append(f"{role}: {text}\n")
+    last_role, last_text = turns[-1]
+    parts.append(
+        f"\n## Latest request — please respond directly\n{last_role}: {last_text}"
+    )
+    return "\n".join(parts)

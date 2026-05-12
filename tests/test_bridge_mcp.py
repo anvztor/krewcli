@@ -540,3 +540,167 @@ async def test_explicit_sandbox_id_passes_through_unchanged(monkeypatch):
 
     # Explicit id wins; auto-resolution did not fire.
     assert posted[0]["json"]["target"] == "sandbox:sbx_explicit_other"
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking delegate (PR2) — short poll window + action=pending
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_client(
+    invocation_id: str = "inv_test_pending",
+    done_after_polls: int | None = None,
+    posted_log: list | None = None,
+):
+    """Helper: build a FakeAsyncClient that returns one invocation and
+    optionally a `done` event after N polls. If `done_after_polls` is
+    None, polling never yields a done event."""
+    polled: list[str] = []
+
+    class _Resp:
+        def __init__(self, status_code: int, body: dict):
+            self.status_code = status_code
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        @property
+        def text(self):
+            return json.dumps(self._body)
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            if posted_log is not None:
+                posted_log.append({"url": url, "json": json})
+            return _Resp(200, {
+                "invocation_id": invocation_id,
+                "tape_id": "tape_xyz",
+                "status": "running",
+            })
+
+        async def get(self, url, headers=None, params=None):
+            polled.append(url)
+            if done_after_polls is not None and len(polled) >= done_after_polls:
+                return _Resp(200, {"events": [
+                    {"id": 0, "kind": "done", "payload": {
+                        "result": {"action": "accept", "content": "answered",
+                                   "reason": None},
+                    }},
+                ], "next_after": 0})
+            return _Resp(200, {"events": [], "next_after": -1})
+
+    return _FakeClient, polled
+
+
+@pytest.mark.asyncio
+async def test_nonblocking_returns_pending_after_window(monkeypatch):
+    """With KREWHUB_DELEGATE_NONBLOCKING=1, if the operator hasn't
+    answered before the short poll window elapses, delegate returns
+    action=pending with the invocation_id — letting the brain end its
+    turn cleanly. PR2 contract."""
+    from krewcli.mcp_servers import bridge
+
+    FakeClient, polled = _make_fake_client(done_after_polls=None)
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SESSION_TOKEN", "tok_test")
+    monkeypatch.setenv("KREWHUB_DELEGATE_NONBLOCKING", "1")
+    monkeypatch.setenv("KREWHUB_DELEGATE_POLL_WINDOW_S", "0.3")  # ~300ms
+
+    result = await bridge.delegate({"to": "human", "input": "pick A or B"})
+
+    assert result["action"] == "pending", result
+    assert result["reason"] == "awaiting_operator"
+    assert result["content"]["invocation_id"] == "inv_test_pending"
+    # Bridge polled at least once before bailing.
+    assert len(polled) >= 1
+
+
+@pytest.mark.asyncio
+async def test_nonblocking_fast_path_still_returns_terminal(monkeypatch):
+    """Non-blocking mode preserves the fast path: if the operator
+    answers within the poll window, delegate returns the terminal
+    envelope just like the legacy blocking path. No spurious
+    `pending`."""
+    from krewcli.mcp_servers import bridge
+
+    FakeClient, polled = _make_fake_client(done_after_polls=2)
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SESSION_TOKEN", "tok_test")
+    monkeypatch.setenv("KREWHUB_DELEGATE_NONBLOCKING", "1")
+    monkeypatch.setenv("KREWHUB_DELEGATE_POLL_WINDOW_S", "10")  # plenty
+
+    result = await bridge.delegate({"to": "human", "input": "any answer?"})
+
+    assert result["action"] == "accept"
+    assert result["content"] == "answered"
+
+
+@pytest.mark.asyncio
+async def test_blocking_mode_unchanged_by_default(monkeypatch):
+    """Without KREWHUB_DELEGATE_NONBLOCKING, the bridge behaves as
+    before: blocks until the invocation deadline expires, then returns
+    an error envelope (not pending). Backwards-compat invariant for
+    PR2 — operators not flipped over keep today's UX."""
+    from krewcli.mcp_servers import bridge
+
+    FakeClient, polled = _make_fake_client(done_after_polls=None)
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SESSION_TOKEN", "tok_test")
+    monkeypatch.delenv("KREWHUB_DELEGATE_NONBLOCKING", raising=False)
+
+    result = await bridge.delegate({
+        "to": "human", "input": "x", "deadline_s": 1,
+    })
+
+    assert result["action"] == "error"
+    assert "timeout" in (result.get("reason") or "")
+
+
+@pytest.mark.asyncio
+async def test_task_id_from_env_lands_in_invocation_body(monkeypatch):
+    """When KREWHUB_TASK_ID is set in the bridge's env (the daemon's
+    exec env always exports it), delegate must include it in the POST
+    body so PR1's projection knows which task tape to append to."""
+    from krewcli.mcp_servers import bridge
+
+    posted: list = []
+    FakeClient, _ = _make_fake_client(done_after_polls=1, posted_log=posted)
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SESSION_TOKEN", "tok_test")
+    monkeypatch.setenv("KREWHUB_TASK_ID", "task_e714588a")
+
+    await bridge.delegate({"to": "human", "input": "test"})
+
+    assert posted, "expected one POST to /invocations"
+    assert posted[0]["json"].get("task_id") == "task_e714588a", posted[0]["json"]
+
+
+@pytest.mark.asyncio
+async def test_task_id_absent_when_env_unset(monkeypatch):
+    """Bridges spawned outside a task context (no KREWHUB_TASK_ID env)
+    must NOT include `task_id` in the body — PR1 falls back to
+    non-projection cleanly for those."""
+    from krewcli.mcp_servers import bridge
+
+    posted: list = []
+    FakeClient, _ = _make_fake_client(done_after_polls=1, posted_log=posted)
+    monkeypatch.setattr(bridge.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
+    monkeypatch.setenv("KREWHUB_SESSION_TOKEN", "tok_test")
+    monkeypatch.delenv("KREWHUB_TASK_ID", raising=False)
+
+    await bridge.delegate({"to": "human", "input": "test"})
+
+    assert posted, "expected one POST to /invocations"
+    assert "task_id" not in posted[0]["json"], posted[0]["json"]

@@ -21,6 +21,16 @@ Required env vars:
 Optional:
 - KREWHUB_POLL_TIMEOUT_S   per-poll timeout (default 30s)
 - KREWHUB_DELEGATE_DEFAULT_DEADLINE_S  default tool deadline (300s)
+- KREWHUB_DELEGATE_NONBLOCKING   "1" → return action=pending after the
+    short poll window (KREWHUB_DELEGATE_POLL_WINDOW_S, default 30s) so
+    the brain can end its turn cleanly instead of holding the sandbox
+    open. The operator's eventual answer projects onto the task tape
+    (PR1) and the brain re-enters on the next claim with full context.
+    Default off — old blocking behavior preserved unless explicitly
+    flipped.
+- KREWHUB_DELEGATE_POLL_WINDOW_S   how long to wait inline for a done
+    event before bailing with `pending` (default 30s, only consulted
+    when NONBLOCKING=1).
 """
 from __future__ import annotations
 
@@ -219,13 +229,41 @@ async def delegate(args: dict) -> dict:
     recipe_id = os.environ.get("KREWHUB_RECIPE_ID")
     if recipe_id:
         body["recipe_id"] = recipe_id
+    # Tag with task_id so a terminal envelope projects onto the task's
+    # events tape (PR1 wiring). The brain's next prompt build threads
+    # the operator's answer as a HUMAN turn, enabling non-blocking
+    # delegate. Only meaningful when the bridge was spawned inside a
+    # task's exec env (the daemon's _delegate.py exports this).
+    task_id = os.environ.get("KREWHUB_TASK_ID")
+    if task_id:
+        body["task_id"] = task_id
     body["idempotency_key"] = (
         args.get("idempotency_key")
         or _generate_idempotency_key(parent_tape_id, args)
     )
 
     poll_timeout = float(os.environ.get("KREWHUB_POLL_TIMEOUT_S", "30"))
-    overall_deadline = time.monotonic() + body["deadline_s"] + 30.0
+
+    # Two operating modes:
+    #   blocking (legacy, default): poll until the invocation's
+    #     deadline_s elapses, then return an error envelope. Holds the
+    #     brain's MCP call open the whole time the operator takes.
+    #   nonblocking (KREWHUB_DELEGATE_NONBLOCKING=1): poll only for a
+    #     short window (default 30s). If no done event arrives, return
+    #     action=pending so the brain can end its turn cleanly. The
+    #     operator's eventual answer projects onto the task tape (PR1)
+    #     and the brain reads it on next re-entry.
+    nonblocking = os.environ.get("KREWHUB_DELEGATE_NONBLOCKING") == "1"
+    if nonblocking:
+        try:
+            poll_window_s = float(
+                os.environ.get("KREWHUB_DELEGATE_POLL_WINDOW_S", "30"),
+            )
+        except ValueError:
+            poll_window_s = 30.0
+        overall_deadline = time.monotonic() + poll_window_s
+    else:
+        overall_deadline = time.monotonic() + body["deadline_s"] + 30.0
 
     try:
         async with httpx.AsyncClient(timeout=poll_timeout) as client:
@@ -253,6 +291,15 @@ async def delegate(args: dict) -> dict:
             after = -1
             while True:
                 if time.monotonic() > overall_deadline:
+                    if nonblocking:
+                        # Hand control back to the brain so it can end
+                        # its turn — the operator answer will arrive
+                        # later via the task tape projection (PR1).
+                        return {
+                            "action": "pending",
+                            "content": {"invocation_id": invocation_id},
+                            "reason": "awaiting_operator",
+                        }
                     return {
                         "action": "error", "content": None,
                         "reason": "delegate_timeout: overall deadline exceeded",

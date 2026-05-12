@@ -64,6 +64,33 @@ schema: <optional schema>)`. This is the only way to reach the operator; \
 there is no local UI. Failures are values — `delegate` always returns a \
 ResultEnvelope, never raises.
 
+HUMAN DELEGATE — `action: "pending"`. When you call \
+`delegate(to: "human", ...)`, the operator may not answer immediately. \
+After a short polling window the bridge returns `{action: "pending", \
+content: {invocation_id: "..."}, reason: "awaiting_operator"}`. This is \
+NOT an error — it means the operator hasn't answered yet but will. When \
+you see `action: "pending"`:
+
+  1. Write a clear `agent_reply` (use the rich-HTML rules below) that \
+     summarizes what you asked the operator and what context you'll \
+     need to continue. Don't pretend you got an answer; don't loop \
+     calling `delegate` again.
+  2. End your turn cleanly — exit, return, finish. Do not call \
+     `delegate` again with the same question; the operator's eventual \
+     answer will arrive on your NEXT turn as a HUMAN message in your \
+     conversation history (a line like `HUMAN: <their answer>` appears \
+     under "Conversation so far" or "Latest request"). Treat that \
+     HUMAN turn as the delegate's belated return value and proceed.
+  3. If you genuinely cannot make progress without the answer, just \
+     end the turn. If you can do other useful work in parallel (e.g. \
+     a sandbox call that doesn't depend on the answer), do that first \
+     and then end the turn — the operator's answer will still be there \
+     when you next run.
+
+`pending` only applies to `to: "human"`. Sandbox and agent delegates \
+always return a terminal envelope (accept / decline / cancel / error) \
+within their deadline.
+
 For sandbox targets, `input` is an object with an `op` field that picks \
 the operation to dispatch:
 

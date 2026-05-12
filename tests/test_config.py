@@ -56,9 +56,8 @@ class TestSettingsDefaults:
         assert s.task_poll_interval == 5
         assert s.token_expiry_minutes == 30
 
-    def test_default_recipe_and_cookbook_blank(self):
+    def test_default_cookbook_blank(self):
         s = Settings()
-        assert s.default_recipe_id == ""
         assert s.default_cookbook_id == ""
 
     def test_default_jwt_secret_blank(self):
@@ -118,12 +117,10 @@ class TestSettingsEnvOverrides:
         monkeypatch.setenv("KREWCLI_VERIFY_SSL", "1")
         assert Settings().verify_ssl is True
 
-    def test_default_cookbook_and_recipe_env(self, monkeypatch):
+    def test_default_cookbook_env(self, monkeypatch):
         monkeypatch.setenv("KREWCLI_DEFAULT_COOKBOOK_ID", "cb_prod")
-        monkeypatch.setenv("KREWCLI_DEFAULT_RECIPE_ID", "rec_prod")
         s = Settings()
         assert s.default_cookbook_id == "cb_prod"
-        assert s.default_recipe_id == "rec_prod"
 
     def test_erc8004_env_override(self, monkeypatch):
         monkeypatch.setenv("KREWCLI_ERC8004_CHAIN_ID", "1")

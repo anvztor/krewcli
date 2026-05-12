@@ -31,7 +31,6 @@ async def test_recovery_path_fails_intentionally():
         client=client,
         backends=backends,
         cookbook_id="cb",
-        recipe_id="rec",
         working_dir="/tmp"
     )
     

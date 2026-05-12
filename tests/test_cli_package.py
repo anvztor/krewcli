@@ -60,11 +60,6 @@ class TestCliPackageReExports:
         from krewcli.cli.join import _run_gateway as _Original
         assert _run_gateway is _Original
 
-    def test_load_recipe_context_re_exported(self):
-        from krewcli.cli import _load_recipe_context
-        from krewcli.cli.claim import _load_recipe_context as _Original
-        assert _load_recipe_context is _Original
-
     def test_run_task_worker_re_exported(self):
         from krewcli.cli import _run_task_worker
         from krewcli.cli.tasks import _run_task_worker as _Original
@@ -158,10 +153,6 @@ class TestCliSubmoduleDirectImports:
     def test_default_model_from_join(self):
         from krewcli.cli.join import _default_model
         assert callable(_default_model)
-
-    def test_load_recipe_context_from_claim(self):
-        from krewcli.cli.claim import _load_recipe_context
-        assert callable(_load_recipe_context)
 
     def test_run_task_worker_from_tasks(self):
         from krewcli.cli.tasks import _run_task_worker

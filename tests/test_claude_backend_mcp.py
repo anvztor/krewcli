@@ -82,7 +82,7 @@ def test_write_mcp_config_emits_valid_json(tmp_path):
     assert env["KREWHUB_SESSION_TOKEN"] == "tok_xyz"
     assert env["KREWHUB_PARENT_TAPE_ID"] == "tape_p"
     assert env["KREWHUB_BUNDLE_ID"] == "bun_1"
-    assert env["KREWHUB_RECIPE_ID"] == "rec_1"
+    assert env["KREWHUB_COOKBOOK_ID"] == "rec_1"
 
 
 def test_write_mcp_config_default_path(tmp_path):

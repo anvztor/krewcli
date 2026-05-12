@@ -26,7 +26,7 @@ def test_codex_home_writer_creates_valid_toml(tmp_path: Path) -> None:
         session_token="tok_xyz",
         parent_tape_id="tape_parent",
         bundle_id="bun_42",
-        recipe_id="rec_77",
+        cookbook_id="rec_77",
     )
 
     home_path = Path(home)
@@ -64,7 +64,7 @@ def test_codex_home_writer_uses_tomllib_compatible_syntax(tmp_path: Path) -> Non
         session_token="tok",
         parent_tape_id="tap",
         bundle_id="bun",
-        recipe_id="rec",
+        cookbook_id="rec",
     )
 
     config_path = Path(home) / "config.toml"
@@ -95,7 +95,7 @@ def test_codex_home_symlinks_auth_when_present(tmp_path: Path, monkeypatch) -> N
         session_token="s",
         parent_tape_id="p",
         bundle_id="b",
-        recipe_id="r",
+        cookbook_id="r",
     )
     auth_link = Path(home) / "auth.json"
     assert auth_link.exists()
@@ -112,7 +112,7 @@ def test_gemini_settings_writer(tmp_path: Path) -> None:
         session_token="tok",
         parent_tape_id="tap",
         bundle_id="bun",
-        recipe_id="rec",
+        cookbook_id="rec",
     )
 
     settings_path = Path(settings_dir) / "settings.json"
@@ -135,7 +135,7 @@ def test_gemini_settings_path_is_project_scope(tmp_path: Path) -> None:
     settings_dir = write_gemini_settings(
         tmp_path,
         krewhub_url="u", task_id="t", session_token="s",
-        parent_tape_id="p", bundle_id="b", recipe_id="r",
+        parent_tape_id="p", bundle_id="b", cookbook_id="r",
     )
     assert Path(settings_dir) == tmp_path / ".gemini"
 
@@ -209,7 +209,7 @@ def test_bridge_env_includes_sandbox_id_when_set(tmp_path: Path) -> None:
         session_token="tok",
         parent_tape_id="tape",
         bundle_id="bun_42",
-        recipe_id="rec_99",
+        cookbook_id="rec_99",
         sandbox_id="sbx_attached_to_bundle",
     )
     body = json.loads(Path(config_path).read_text(encoding="utf-8"))
@@ -230,7 +230,7 @@ def test_bridge_env_omits_sandbox_id_when_unset(tmp_path: Path) -> None:
         session_token="tok",
         parent_tape_id="tape",
         bundle_id="bun_42",
-        recipe_id="rec_99",
+        cookbook_id="rec_99",
     )
     body = json.loads(Path(config_path).read_text(encoding="utf-8"))
     bridge_env = body["mcpServers"]["krewcli-bridge"]["env"]
@@ -260,7 +260,7 @@ def test_bridge_command_is_current_python() -> None:
         path = write_claude_mcp_config(
             td,
             krewhub_url="u", task_id="t", session_token="s",
-            parent_tape_id="p", bundle_id="b", recipe_id="r",
+            parent_tape_id="p", bundle_id="b", cookbook_id="r",
         )
         body = json.loads(Path(path).read_text(encoding="utf-8"))
         assert body["mcpServers"]["krewcli-bridge"]["command"] == sys.executable

@@ -156,7 +156,7 @@ class _PollClient(_FakeClient):
             {
                 "id": "task_1",
                 "bundle_id": "bun_1",
-                "recipe_id": "rec_1",
+                "cookbook_id": "cb_1",
                 "title": "ship from cookrew-beta",
                 "description": "created through the UI",
                 "status": "open",
@@ -166,8 +166,8 @@ class _PollClient(_FakeClient):
             },
         ]
 
-    async def poll_claimable_tasks(self, recipe_id):
-        assert recipe_id == "rec_1"
+    async def poll_claimable_tasks(self, cookbook_id):
+        assert cookbook_id == "cb_1"
         return self.claimable
 
     async def claim_task(self, task_id, agent_id):
@@ -198,7 +198,6 @@ class TestDaemonLoopCookrewPolling:
             client=client,
             backends={"echo": EchoBackend()},
             cookbook_id="cb_1",
-            recipe_id="rec_1",
             working_dir=str(tmp_path),
             max_concurrent=1,
         )
@@ -223,7 +222,6 @@ class TestDaemonLoopCookrewPolling:
             client=client,
             backends={"echo": EchoBackend()},
             cookbook_id="cb_1",
-            recipe_id="rec_1",
             working_dir=str(tmp_path),
             max_concurrent=1,
         )

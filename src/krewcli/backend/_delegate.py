@@ -232,6 +232,21 @@ def _bridge_env(
     # `no_sandbox_attached`.
     if sandbox_id:
         env["KREWHUB_SANDBOX_ID"] = sandbox_id
+    # Forward the non-blocking delegate flag (PR2) + its window override
+    # from the daemon's parent env, so flipping them on the daemon
+    # propagates to every bridge spawned inside a brain process. Default
+    # is unset (= legacy blocking) — operators opt in by exporting them
+    # before launching `krewcli daemon start`.
+    import os as _os
+    for var in (
+        "KREWHUB_DELEGATE_NONBLOCKING",
+        "KREWHUB_DELEGATE_POLL_WINDOW_S",
+        "KREWHUB_DELEGATE_DEFAULT_DEADLINE_S",
+        "KREWHUB_POLL_TIMEOUT_S",
+    ):
+        v = _os.environ.get(var)
+        if v:
+            env[var] = v
     return env
 
 

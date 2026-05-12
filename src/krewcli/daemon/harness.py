@@ -140,6 +140,12 @@ class Harness:
 
         cancelled = False
         streamed_texts: list[str] = []
+        # Track pending delegate invocations the brain raised this run.
+        # When the bridge runs with KREWHUB_DELEGATE_NONBLOCKING=1 it can
+        # return action="pending" if the operator hasn't answered within
+        # the short poll window. We surface those at session end by
+        # flipping the task to `blocked` so the HITL popout opens.
+        pending_invocations: list[str] = []
         try:
             async with asyncio.timeout(_EXECUTION_TIMEOUT_SECONDS):
                 # Stream messages → session
@@ -151,6 +157,15 @@ class Harness:
                         text = msg.payload.get("text", msg.body)
                         if text:
                             streamed_texts.append(text)
+
+                    # Detect pending-delegate results. The bridge returns
+                    # an MCP ResultEnvelope serialized into the tool_result
+                    # `output` field; parse it to spot `action: pending`
+                    # and remember the invocation_id for blocked_reason.
+                    if msg.kind == "tool_result":
+                        inv_id = _pending_invocation_id(msg.payload)
+                        if inv_id:
+                            pending_invocations.append(inv_id)
 
                     # Periodically check cancellation.
                     if msg.kind in ("session_start", "tool_use"):
@@ -230,6 +245,24 @@ class Harness:
         if cancelled:
             # Task was cancelled — status already set by krewhub
             pass
+        elif pending_invocations:
+            # Brain ended its turn with at least one pending delegate
+            # outstanding (non-blocking mode). Surface to the operator
+            # via the HITL popout — cookrew-beta derives hitl='needs_input'
+            # from status='blocked'. The operator's eventual answer
+            # projects onto the task tape (PR1) and flips status back
+            # to open via /tasks/{id}/followup.
+            inv_ref = pending_invocations[-1]
+            try:
+                await self._client.update_task_status(
+                    task_id, "blocked",
+                    blocked_reason=f"awaiting_operator: {inv_ref}",
+                )
+            except Exception:
+                logger.warning(
+                    "harness: failed to set task %s to blocked (pending %s)",
+                    task_id, inv_ref,
+                )
         elif result.success:
             try:
                 await self._client.update_task_status(task_id, "done")
@@ -254,3 +287,39 @@ class Harness:
             code_refs=result.code_refs,
             cancelled=cancelled,
         )
+
+
+def _pending_invocation_id(payload: dict | None) -> str | None:
+    """If a `tool_result` message's payload looks like a delegate
+    ResultEnvelope with action='pending', return the invocation_id;
+    else return None.
+
+    Backend wrappers (claude/codex/gemini) stuff the raw MCP tool
+    result into `payload.output` as a text string — the bridge's
+    delegate() return value is JSON, so we parse it. Any non-pending
+    or non-JSON output is silently ignored: the brain may invoke other
+    MCP tools or non-delegate calls that we don't care about here.
+    """
+    if not isinstance(payload, dict):
+        return None
+    output = payload.get("output")
+    if not isinstance(output, str):
+        return None
+    text = output.strip()
+    if not text or text[0] not in "{[":
+        return None
+    import json
+    try:
+        envelope = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    if envelope.get("action") != "pending":
+        return None
+    content = envelope.get("content")
+    if isinstance(content, dict):
+        inv = content.get("invocation_id")
+        if isinstance(inv, str) and inv:
+            return inv
+    return "unknown_invocation"

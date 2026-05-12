@@ -21,7 +21,7 @@ def runner():
 def test_join_rejects_legacy_provider(runner):
     """Legacy --provider mode should be rejected."""
     result = runner.invoke(main, [
-        "join", "--recipe", "R1", "--cookbook", "CB1",
+        "join", "--cookbook", "CB1",
         "--provider", "anthropic",
     ])
     assert result.exit_code != 0
@@ -31,25 +31,16 @@ def test_join_rejects_legacy_provider(runner):
 def test_join_rejects_legacy_framework(runner):
     """Legacy --framework mode should be rejected."""
     result = runner.invoke(main, [
-        "join", "--recipe", "R1", "--cookbook", "CB1",
+        "join", "--cookbook", "CB1",
         "--framework", "anthropic",
     ])
     assert result.exit_code != 0
 
 
-def test_join_requires_recipe(runner):
-    """Join without --recipe should error."""
-    result = runner.invoke(main, [
-        "join", "--cookbook", "CB1",
-    ])
-    assert result.exit_code != 0
-    assert "recipe" in result.output.lower()
-
-
 def test_join_requires_cookbook(runner):
     """Join without --cookbook (and no default) should error."""
     result = runner.invoke(main, [
-        "join", "--recipe", "R1",
+        "join",
     ], env={"KREWCLI_DEFAULT_COOKBOOK_ID": ""})
     # Should either require cookbook or use default
     # The specific error depends on settings

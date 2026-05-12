@@ -43,8 +43,8 @@ class _FakeClient:
         self.list_tasks_calls: list[tuple] = []
         self._event_id = "evt_fake"
 
-    async def list_tasks(self, recipe_id, bundle_statuses=None):
-        self.list_tasks_calls.append((recipe_id, bundle_statuses))
+    async def list_tasks(self, cookbook_id, bundle_statuses=None):
+        self.list_tasks_calls.append((cookbook_id, bundle_statuses))
         return self.tasks_response
 
     async def post_event(self, task_id, event_type, actor_id, body, facts=None, **kwargs):
@@ -91,7 +91,7 @@ class TestListTasksCommand:
     def test_requires_recipe_option(self, runner):
         result = runner.invoke(main, ["list-tasks"])
         assert result.exit_code != 0
-        assert "--recipe" in result.output
+        assert "--cookbook" in result.output
 
     def test_renders_tasks_grouped_by_bundle(self, runner, monkeypatch):
         client = _FakeClient()
@@ -125,7 +125,7 @@ class TestListTasksCommand:
         monkeypatch.setattr("krewcli.cli.KrewHubClient", lambda *a, **kw: client)
         monkeypatch.setattr("krewcli.auth.token_store.load_token", lambda *a, **kw: None)
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
 
         assert result.exit_code == 0, result.output
         assert "Bundle: bun_1 [open]" in result.output
@@ -139,7 +139,7 @@ class TestListTasksCommand:
         # Bundle prompt should be echoed (truncated to 80 chars by the CLI).
         assert "Build the heartbeat endpoint" in result.output
         # Filter is forwarded to client
-        assert client.list_tasks_calls == [("rec_1", ("open", "claimed"))]
+        assert client.list_tasks_calls == [("cb_1", ("open",))]
         assert client.closed is True
 
     def test_unknown_status_uses_question_mark_icon(self, runner, monkeypatch):
@@ -157,7 +157,7 @@ class TestListTasksCommand:
         monkeypatch.setattr("krewcli.cli.KrewHubClient", lambda *a, **kw: client)
         monkeypatch.setattr("krewcli.auth.token_store.load_token", lambda *a, **kw: None)
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
 
         assert result.exit_code == 0, result.output
         assert "[?] task_x: Mystery" in result.output
@@ -167,7 +167,7 @@ class TestListTasksCommand:
         monkeypatch.setattr("krewcli.cli.KrewHubClient", lambda *a, **kw: client)
         monkeypatch.setattr("krewcli.auth.token_store.load_token", lambda *a, **kw: None)
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_empty"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_empty"])
 
         assert result.exit_code == 0, result.output
         # No bundle header rendered
@@ -242,7 +242,7 @@ class TestClaimCommand:
     def test_requires_recipe_option(self, runner):
         result = runner.invoke(main, ["claim", "task_1"])
         assert result.exit_code != 0
-        assert "--recipe" in result.output
+        assert "--cookbook" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ class TestGroupErrorHandling:
             "boom\n[SSL: CERTIFICATE_VERIFY_FAILED] cert verify failed"
         )
         self._install_raising_client(monkeypatch, exc)
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
         assert result.exit_code != 0
         assert "SSL certificate error" in result.output
         assert "KREWCLI_VERIFY_SSL=false" in result.output
@@ -277,7 +277,7 @@ class TestGroupErrorHandling:
     def test_connect_error_generic(self, runner, monkeypatch):
         exc = httpx.ConnectError("connection refused")
         self._install_raising_client(monkeypatch, exc)
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
         assert result.exit_code != 0
         assert "Cannot connect to KrewHub" in result.output
         assert "connection refused" in result.output
@@ -288,7 +288,7 @@ class TestGroupErrorHandling:
         exc = httpx.HTTPStatusError("unauth", request=request, response=response)
         self._install_raising_client(monkeypatch, exc)
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
         assert result.exit_code != 0
         assert "Authentication failed (401)" in result.output
         assert "krewcli login" in result.output
@@ -299,7 +299,7 @@ class TestGroupErrorHandling:
         exc = httpx.HTTPStatusError("server error", request=request, response=response)
         self._install_raising_client(monkeypatch, exc)
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
         assert result.exit_code != 0
         assert "KrewHub returned 500" in result.output
         assert "kaboom server error" in result.output
@@ -310,7 +310,7 @@ class TestGroupErrorHandling:
         exc = httpx.ReadTimeout("read timed out", request=request)
         self._install_raising_client(monkeypatch, exc)
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
         assert result.exit_code != 0
         assert "Network error" in result.output
         assert "read timed out" in result.output
@@ -319,7 +319,7 @@ class TestGroupErrorHandling:
         # Sanity check: errors outside the httpx hierarchy bubble up.
         self._install_raising_client(monkeypatch, RuntimeError("unexpected"))
 
-        result = runner.invoke(main, ["list-tasks", "--recipe", "rec_1"])
+        result = runner.invoke(main, ["list-tasks", "--cookbook", "cb_1"])
         assert result.exit_code != 0
         # CliRunner captures the exception in result.exception
         assert isinstance(result.exception, RuntimeError)
@@ -349,7 +349,6 @@ class TestStartLegacyCommand:
             main,
             [
                 "start",
-                "--recipe", "rec_1",
                 "--cookbook", "cb_1",
                 "--agent", "claude",
                 "--workdir", "/tmp/work",
@@ -358,7 +357,6 @@ class TestStartLegacyCommand:
 
         assert result.exit_code == 0, result.output
         kwargs = captured["kwargs"]
-        assert kwargs["recipe"] == "rec_1"
         assert kwargs["cookbook"] == "cb_1"
         assert kwargs["agent"] == "claude"
         assert kwargs["workdir"] == "/tmp/work"

@@ -194,13 +194,7 @@ class TestLoginCommand:
 
             async def get_cookbook(self, cb_id):
                 self.calls.append(f"get_cookbook:{cb_id}")
-                return {"recipes": []}
-
-            async def create_recipe(self, *, name, repo_url, created_by, cookbook_id):
-                self.calls.append(
-                    f"create_recipe:{name}:{cookbook_id}:{created_by}",
-                )
-                return {"id": "rec_e2e", "name": name}
+                return {"cookbook": {"id": cb_id}}
 
             async def close(self):
                 self.calls.append("close")
@@ -239,12 +233,8 @@ class TestLoginCommand:
         client = captured["client"]
         assert "list_cookbooks" in client.calls
         assert any(url.endswith("/cookbooks") for url, _ in client._client.posts)
-        assert any(
-            c.startswith("create_recipe:my-recipe:cb_e2e:") for c in client.calls
-        )
         kw = captured["daemon_kwargs"]
         assert kw["cookbook_id"] == "cb_e2e"
-        assert kw["recipe_id"] == "rec_e2e"
         assert "claude" in kw["backends"]
         assert kw["working_dir"] == str(tmp_path)
 
@@ -281,7 +271,6 @@ class TestLoginCommand:
         argv = spawn_calls[0]
         assert "--foreground" in argv
         assert argv[argv.index("--cookbook") + 1] == "cb_e2e"
-        assert argv[argv.index("--recipe") + 1] == "rec_e2e"
         assert argv[argv.index("--agents") + 1] == "claude"
         assert argv[argv.index("--workdir") + 1] == str(tmp_path)
 

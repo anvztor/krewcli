@@ -8,7 +8,6 @@ import os
 import click
 
 from krewcli.backend.registry import BACKEND_INFO, get_backend
-from krewcli.recipe_context import load_recipe_context
 
 
 def _compat_lookup(name: str, default):
@@ -29,21 +28,17 @@ def _compat_lookup(name: str, default):
     return default
 
 
-async def _load_recipe_context(client, recipe_id):
-    return await load_recipe_context(client, recipe_id)
-
-
 def register_claim_commands(main: click.Group) -> None:
     """Register the claim command on the CLI group."""
 
     @main.command()
     @click.argument("task_id")
-    @click.option("--recipe", required=True)
+    @click.option("--cookbook", required=True)
     @click.option("--agent", type=click.Choice(list(BACKEND_INFO.keys())), default="claude")
     @click.option("--agent-id", default=None)
     @click.option("--workdir", default=".")
     @click.pass_context
-    def claim(ctx, task_id, recipe, agent, agent_id, workdir):
+    def claim(ctx, task_id, cookbook, agent, agent_id, workdir):
         """Claim and execute a single task."""
         client = ctx.obj["client"]
         settings = ctx.obj["settings"]
@@ -59,9 +54,6 @@ def register_claim_commands(main: click.Group) -> None:
             from krewcli.gateway.identity import _get_owner_label, _make_agent_id
             from krewcli.presence.heartbeat import HeartbeatLoop
 
-            recipe_context_loader = _compat_lookup("_load_recipe_context", _load_recipe_context)
-            repo_url, branch = await recipe_context_loader(client, recipe)
-
             owner = _get_owner_label()
             agent_id_full = _make_agent_id(agent, owner)
 
@@ -69,7 +61,7 @@ def register_claim_commands(main: click.Group) -> None:
             try:
                 await client.register_agent(
                     agent_id=agent_id_full,
-                    cookbook_id=recipe,
+                    cookbook_id=cookbook,
                     display_name=info.get("display_name", agent),
                     capabilities=info.get("capabilities", ["claim"]),
                 )
@@ -77,7 +69,7 @@ def register_claim_commands(main: click.Group) -> None:
                 pass
 
             heartbeat = HeartbeatLoop(
-                client=client, agent_id=agent_id_full, cookbook_id=recipe,
+                client=client, agent_id=agent_id_full, cookbook_id=cookbook,
                 display_name=info.get("display_name", agent),
                 capabilities=info.get("capabilities", ["claim"]),
                 interval=settings.heartbeat_interval,
@@ -93,15 +85,17 @@ def register_claim_commands(main: click.Group) -> None:
                 await client.close()
                 return
 
-            # Execute via harness
+            # Execute via harness. Repo binding is now per-bundle
+            # (bundle.repo_spec), not per-recipe — claim doesn't need
+            # to resolve it up-front.
             backend = get_backend(agent)
             session = Session(client, task_id, agent_id_full)
             execenv = ExecutionEnvironment(
                 base_dir=resolved_workdir,
                 task_id=task_id,
                 bundle_id=claimed.get("bundle_id", ""),
-                repo_url=repo_url,
-                branch=branch,
+                repo_url="",
+                branch="",
             )
             prompt = f"# Task: {claimed.get('title', '')}\n\n{claimed.get('description', '')}"
 
@@ -115,6 +109,7 @@ def register_claim_commands(main: click.Group) -> None:
                     task_id=task_id,
                     task_title=claimed.get("title", ""),
                     task_description=claimed.get("description", ""),
+                    cookbook_id=cookbook,
                     bundle_id=claimed.get("bundle_id", ""),
                 )
                 if result.success:

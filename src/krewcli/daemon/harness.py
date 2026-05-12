@@ -68,7 +68,7 @@ class Harness:
         task_id: str,
         task_title: str = "",
         task_description: str = "",
-        recipe_id: str = "",
+        cookbook_id: str = "",
         bundle_id: str = "",
         krewhub_url: str = "",
         session_token: str = "",
@@ -106,7 +106,7 @@ class Harness:
 
         # 2. Pre-execution sandbox validation
         env_overlay = execenv.build_env(
-            recipe_id=recipe_id,
+            cookbook_id=cookbook_id,
             krewhub_url=krewhub_url,
             session_token=session_token,
         )

@@ -146,7 +146,7 @@ class ExecutionEnvironment:
 
     def build_env(
         self,
-        recipe_id: str = "",
+        cookbook_id: str = "",
         extra: dict[str, str] | None = None,
         *,
         krewhub_url: str = "",
@@ -168,7 +168,7 @@ class ExecutionEnvironment:
         env = {
             "KREWHUB_TASK_ID": self._task_id,
             "KREWHUB_BUNDLE_ID": self._bundle_id,
-            "KREWHUB_RECIPE_ID": recipe_id,
+            "KREWHUB_COOKBOOK_ID": cookbook_id,
             "KREWHUB_REPO_URL": self._repo_url,
             "KREWHUB_BRANCH": self._branch,
         }

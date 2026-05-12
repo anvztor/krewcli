@@ -3,9 +3,9 @@
 ``krewcli daemon start`` replaces the old ``krewcli join --gateway``
 workflow with a simpler pull-based daemon that polls krewhub for tasks.
 
-When ``--cookbook`` and ``--recipe`` are omitted, interactive prompts
-guide the user through cookbook/recipe/agent selection — preserving
-the UX from the old ``join`` command.
+When ``--cookbook`` is omitted, an interactive prompt guides the user
+through cookbook + agent selection — preserving the UX from the old
+``join`` command.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ def daemon() -> None:
 
 @daemon.command()
 @click.option("--cookbook", default=None, help="Cookbook ID (interactive if omitted)")
-@click.option("--recipe", default=None, help="Recipe ID (interactive if omitted)")
 @click.option("--workdir", default=".", help="Working directory for agent execution")
 @click.option(
     "--agents",
@@ -55,7 +54,6 @@ def daemon() -> None:
 def start(
     ctx: click.Context,
     cookbook: str | None,
-    recipe: str | None,
     workdir: str,
     agents: str | None,
     max_concurrent: int,
@@ -67,14 +65,14 @@ def start(
     """Start the daemon. Polls krewhub for tasks and executes them.
 
     \b
-    When --cookbook or --recipe are omitted, an interactive prompt
-    guides you through selecting them from your krewhub account.
+    When --cookbook is omitted, an interactive prompt guides you
+    through selecting one from your krewhub account.
 
     \b
     Examples:
       krewcli daemon start                           # fully interactive
-      krewcli daemon start --cookbook CB --recipe R   # non-interactive
-      krewcli daemon start --cookbook CB --recipe R --agents echo  # test mode
+      krewcli daemon start --cookbook CB              # non-interactive
+      krewcli daemon start --cookbook CB --agents echo  # test mode
     """
     import os
 
@@ -85,8 +83,7 @@ def start(
     resolved_workdir = os.path.abspath(workdir)
 
     resolved_cookbook = cookbook or settings.default_cookbook_id
-    resolved_recipe = recipe
-    need_interactive = not resolved_cookbook or not resolved_recipe
+    need_interactive = not resolved_cookbook
 
     # ── Interactive selection (uses a temporary sync client) ──────
 
@@ -97,35 +94,14 @@ def start(
         _client = _make_sync_client(settings)
 
         try:
-            if not resolved_cookbook:
-                cookbooks = _loop.run_until_complete(_client.list_cookbooks())
-                if not cookbooks:
-                    raise click.ClickException(
-                        "No cookbooks found. Create one in cookrew first."
-                    )
-                cb_items = [(cb["name"], cb["id"]) for cb in cookbooks]
-                cb_idx = prompt_single_select("Cookbooks", cb_items)
-                resolved_cookbook = cookbooks[cb_idx]["id"]
-
-            if not resolved_recipe:
-                detail = _loop.run_until_complete(
-                    _client.get_cookbook(resolved_cookbook),
+            cookbooks = _loop.run_until_complete(_client.list_cookbooks())
+            if not cookbooks:
+                raise click.ClickException(
+                    "No cookbooks found. Create one in cookrew first."
                 )
-                recipes = detail.get("recipes", [])
-                if not recipes:
-                    raise click.ClickException(
-                        f"No recipes in cookbook '{resolved_cookbook}'. "
-                        "Create one in cookrew first."
-                    )
-                rec_items = [(r.get("name", r["id"]), r["id"]) for r in recipes]
-                if len(rec_items) == 1:
-                    rec_idx = 0
-                    click.echo(
-                        f"\nRecipe: {rec_items[0][0]} ({rec_items[0][1]}) [auto-selected]"
-                    )
-                else:
-                    rec_idx = prompt_single_select("Recipes", rec_items)
-                resolved_recipe = recipes[rec_idx]["id"]
+            cb_items = [(cb["name"], cb["id"]) for cb in cookbooks]
+            cb_idx = prompt_single_select("Cookbooks", cb_items)
+            resolved_cookbook = cookbooks[cb_idx]["id"]
         finally:
             _loop.run_until_complete(_client.close())
             _loop.close()
@@ -169,7 +145,6 @@ def start(
 
         child_args = _build_foreground_args(
             cookbook_id=resolved_cookbook,
-            recipe_id=resolved_recipe,
             workdir=resolved_workdir,
             agents=list(backends.keys()),
             max_concurrent=max_concurrent,
@@ -181,7 +156,6 @@ def start(
         # child takes a moment to write its own ready marker.
         supervisor.write_status({
             "cookbook_id": resolved_cookbook,
-            "recipe_id": resolved_recipe,
             "agents": list(backends.keys()),
             "workdir": resolved_workdir,
             "started_at": _now_iso(),
@@ -194,7 +168,7 @@ def start(
         if supervisor.wait_until_ready(pid):
             click.echo(
                 f"  Agents online: {', '.join(backends.keys())} — "
-                f"cookbook {resolved_cookbook}, recipe {resolved_recipe}"
+                f"cookbook {resolved_cookbook}"
             )
         else:
             click.echo(
@@ -210,7 +184,6 @@ def start(
 
     supervisor.write_status({
         "cookbook_id": resolved_cookbook,
-        "recipe_id": resolved_recipe,
         "agents": list(backends.keys()),
         "workdir": resolved_workdir,
         "started_at": _now_iso(),
@@ -221,7 +194,6 @@ def start(
     click.echo("\nkrewcli daemon starting")
     click.echo(f"  KrewHub:    {settings.krewhub_url}")
     click.echo(f"  Cookbook:    {resolved_cookbook}")
-    click.echo(f"  Recipe:     {resolved_recipe}")
     click.echo(f"  Agents:     {', '.join(backends.keys())}")
     click.echo(f"  Work dir:   {resolved_workdir}")
     click.echo(f"  Concurrent: {max_concurrent}")
@@ -231,7 +203,6 @@ def start(
             settings=settings,
             backends=backends,
             cookbook_id=resolved_cookbook,
-            recipe_id=resolved_recipe,
             working_dir=resolved_workdir,
             repo_url=repo_url,
             branch=branch,
@@ -246,7 +217,6 @@ async def _run_daemon(
     settings,
     backends,
     cookbook_id: str,
-    recipe_id: str,
     working_dir: str,
     repo_url: str,
     branch: str,
@@ -269,7 +239,6 @@ async def _run_daemon(
         client=client,
         backends=backends,
         cookbook_id=cookbook_id,
-        recipe_id=recipe_id,
         working_dir=working_dir,
         repo_url=repo_url,
         branch=branch,
@@ -299,8 +268,6 @@ def status() -> None:
         click.echo(f"Started:   {info['started_at']}")
     if info.get("cookbook_id"):
         click.echo(f"Cookbook:  {info['cookbook_id']}")
-    if info.get("recipe_id"):
-        click.echo(f"Recipe:    {info['recipe_id']}")
     if info.get("agents"):
         click.echo(f"Agents:    {', '.join(info['agents'])}")
     if info.get("workdir"):
@@ -353,7 +320,6 @@ def _now_iso() -> str:
 def _build_foreground_args(
     *,
     cookbook_id: str,
-    recipe_id: str,
     workdir: str,
     agents: list[str],
     max_concurrent: int,
@@ -364,14 +330,12 @@ def _build_foreground_args(
     """Build the argv tail passed to the spawned `daemon start --foreground`.
 
     Mirrors multica's buildDaemonStartArgs — every choice the parent
-    resolved (cookbook, recipe, agents, workdir) is forwarded to the
-    child so it doesn't re-prompt or re-detect.
+    resolved (cookbook, agents, workdir) is forwarded to the child so
+    it doesn't re-prompt or re-detect.
     """
     args: list[str] = ["--foreground"]
     if cookbook_id:
         args += ["--cookbook", cookbook_id]
-    if recipe_id:
-        args += ["--recipe", recipe_id]
     if workdir:
         args += ["--workdir", workdir]
     if agents:

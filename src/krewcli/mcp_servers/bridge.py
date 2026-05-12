@@ -223,12 +223,9 @@ async def delegate(args: dict) -> dict:
         body["label"] = args["label"]
     if parent_tape_id:
         body["parent_tape_id"] = parent_tape_id
-    # Tag with recipe_id (if set) so invocation events fan out through
-    # the cookrew operator's recipe SSE stream — they see HITL elicits
-    # appear in real time without polling.
-    recipe_id = os.environ.get("KREWHUB_RECIPE_ID")
-    if recipe_id:
-        body["recipe_id"] = recipe_id
+    # Note: krewhub retired recipe scoping (anvztor/krewhub#1). The
+    # invocation route now derives its SSE channel from the task's
+    # bundle.cookbook_id server-side — no explicit field needed.
     # Tag with task_id so a terminal envelope projects onto the task's
     # events tape (PR1 wiring). The brain's next prompt build threads
     # the operator's answer as a HUMAN turn, enabling non-blocking

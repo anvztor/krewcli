@@ -45,7 +45,6 @@ class Settings(BaseSettings):
     agent_host: str = "127.0.0.1"
     heartbeat_interval: int = 15
     task_poll_interval: int = 5
-    default_recipe_id: str = ""
     default_cookbook_id: str = ""
     jwt_secret: str = ""
     token_expiry_minutes: int = 30
@@ -68,7 +67,7 @@ class Settings(BaseSettings):
         Bug context: a user that exports just
         ``KREWCLI_KREW_AUTH_URL=https://auth.cookrew.dev`` would get
         device-flow auth against prod but the daemon's cookbook /
-        recipe / agent-registration calls would silently target the
+        agent-registration calls would silently target the
         ``http://127.0.0.1:8420`` default — local krewhub isn't
         running, so login completes but no agents ever come online.
 

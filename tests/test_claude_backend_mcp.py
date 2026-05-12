@@ -30,7 +30,7 @@ async def test_build_claude_args_includes_mcp_config(tmp_path):
         session_token="tok_xyz",
         parent_tape_id="tape_parent_42",
         bundle_id="bun_99",
-        recipe_id="rec_77",
+        cookbook_id="rec_77",
     )
     args = build_claude_args(prompt="do the thing", mcp_config_path=config_path)
 
@@ -63,7 +63,7 @@ def test_write_mcp_config_emits_valid_json(tmp_path):
         session_token="tok_xyz",
         parent_tape_id="tape_p",
         bundle_id="bun_1",
-        recipe_id="rec_1",
+        cookbook_id="rec_1",
     )
     body = json.loads(Path(config_path).read_text())
 
@@ -94,13 +94,13 @@ def test_write_mcp_config_default_path(tmp_path):
         tmp_path,
         krewhub_url="http://x", task_id="t1",
         session_token="s", parent_tape_id="p",
-        bundle_id="b", recipe_id="r",
+        bundle_id="b", cookbook_id="r",
     )
     p2 = write_mcp_config(
         tmp_path,
         krewhub_url="http://x", task_id="t1",
         session_token="s", parent_tape_id="p",
-        bundle_id="b", recipe_id="r",
+        bundle_id="b", cookbook_id="r",
     )
     assert p1 == p2
 

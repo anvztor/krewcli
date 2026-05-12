@@ -6,17 +6,11 @@ import asyncio
 
 import click
 
-from krewcli.recipe_context import load_recipe_context
-
 
 def _compat_lookup(name: str, default):
     import krewcli.cli as cli
     value = getattr(cli, name, default)
     return default if value is default else value
-
-
-async def _load_recipe_context(client, recipe_id):
-    return await load_recipe_context(client, recipe_id)
 
 
 async def _run_task_worker(*_args, **_kwargs):
@@ -35,15 +29,15 @@ def register_task_commands(main: click.Group) -> None:
     """Register list-tasks and milestone commands on the CLI group."""
 
     @main.command("list-tasks")
-    @click.option("--recipe", required=True)
+    @click.option("--cookbook", required=True)
     @click.pass_context
-    def list_tasks(ctx, recipe):
-        """List available tasks for a recipe."""
+    def list_tasks(ctx, cookbook):
+        """List available tasks for a cookbook."""
         client = ctx.obj["client"]
 
         async def _run():
             try:
-                tasks = await client.list_tasks(recipe, bundle_statuses=("open", "claimed"))
+                tasks = await client.list_tasks(cookbook, bundle_statuses=("open",))
                 seen = set()
                 for task in tasks:
                     bid = task["bundle_id"]

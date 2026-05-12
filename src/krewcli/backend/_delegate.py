@@ -64,6 +64,28 @@ schema: <optional schema>)`. This is the only way to reach the operator; \
 there is no local UI. Failures are values — `delegate` always returns a \
 ResultEnvelope, never raises.
 
+MANDATORY WAIT — every `delegate(...)` call returns a ResultEnvelope, \
+and you MUST inspect that envelope's `action` BEFORE you write your final \
+`agent_reply` or finish the session. The tool result is what tells you \
+whether the operator answered, declined, the call timed out, or it's \
+still pending. Concretely:
+
+  • DO NOT emit a "Done", "completed", "checked", or summary message \
+    immediately after a `tool_use` of `delegate`. The next thing in \
+    your turn after `delegate(...)` MUST be reading its `tool_result` \
+    envelope.
+  • DO NOT call a peer tool, declare success, or end the session \
+    until you have seen the envelope. Even a fire-and-forget \
+    `delegate(to:"human", ...)` returns within ~30 s with at minimum \
+    `action: "pending"` — your final response has to acknowledge that.
+  • DO NOT assume the answer. If the envelope is `accept`, use the \
+    content. If `decline` / `cancel` / `error`, surface what the \
+    operator (or platform) said and adjust. If `pending`, follow the \
+    pending-rules below.
+
+This isn't just about `delegate(human)` — `delegate(sandbox, …)` and \
+`delegate(agent:…, …)` have the same shape. Always read the envelope.
+
 HUMAN DELEGATE — `action: "pending"`. When you call \
 `delegate(to: "human", ...)`, the operator may not answer immediately. \
 After a short polling window the bridge returns `{action: "pending", \
@@ -90,6 +112,17 @@ you see `action: "pending"`:
 `pending` only applies to `to: "human"`. Sandbox and agent delegates \
 always return a terminal envelope (accept / decline / cancel / error) \
 within their deadline.
+
+ANTI-PATTERN — don't do this:
+  • [tool_use delegate(human, …)] → "✓ Done — README already exists" \
+    (You haven't seen the operator's answer yet. The tool_result \
+    envelope is still in flight. Wait for it.)
+  • [tool_use delegate(human, …)] → another tool_use without inspecting \
+    the previous envelope. (Each tool_use must be paired with reading \
+    its tool_result before the next action.)
+  • [tool_use delegate(human, …)] → session_end. (You're abandoning \
+    the operator's response. Wait, see the envelope, then end based \
+    on what it said.)
 
 For sandbox targets, `input` is an object with an `op` field that picks \
 the operation to dispatch:
@@ -216,7 +249,7 @@ def _bridge_env(
     session_token: str,
     parent_tape_id: str,
     bundle_id: str,
-    recipe_id: str,
+    cookbook_id: str,
     sandbox_id: str = "",
 ) -> dict[str, str]:
     env = {
@@ -224,7 +257,7 @@ def _bridge_env(
         "KREWHUB_SESSION_TOKEN": session_token,
         "KREWHUB_TASK_ID": task_id,
         "KREWHUB_BUNDLE_ID": bundle_id,
-        "KREWHUB_RECIPE_ID": recipe_id,
+        "KREWHUB_COOKBOOK_ID": cookbook_id,
         "KREWHUB_PARENT_TAPE_ID": parent_tape_id,
     }
     # The bridge reads KREWHUB_SANDBOX_ID to auto-resolve bare
@@ -267,7 +300,7 @@ def write_claude_mcp_config(
     session_token: str,
     parent_tape_id: str,
     bundle_id: str,
-    recipe_id: str,
+    cookbook_id: str,
     sandbox_id: str = "",
 ) -> str:
     """Generate the JSON `--mcp-config` file claude expects.
@@ -291,7 +324,7 @@ def write_claude_mcp_config(
                     session_token=session_token,
                     parent_tape_id=parent_tape_id,
                     bundle_id=bundle_id,
-                    recipe_id=recipe_id,
+                    cookbook_id=cookbook_id,
                     sandbox_id=sandbox_id,
                 ),
             }
@@ -309,7 +342,7 @@ def write_codex_home(
     session_token: str,
     parent_tape_id: str,
     bundle_id: str,
-    recipe_id: str,
+    cookbook_id: str,
     sandbox_id: str = "",
 ) -> str:
     """Build a per-task `CODEX_HOME` and write `config.toml` declaring
@@ -354,7 +387,7 @@ def write_codex_home(
         session_token=session_token,
         parent_tape_id=parent_tape_id,
         bundle_id=bundle_id,
-        recipe_id=recipe_id,
+        cookbook_id=cookbook_id,
         sandbox_id=sandbox_id,
     )
 
@@ -376,7 +409,7 @@ def write_gemini_settings(
     session_token: str,
     parent_tape_id: str,
     bundle_id: str,
-    recipe_id: str,
+    cookbook_id: str,
     sandbox_id: str = "",
 ) -> str:
     """Write `.gemini/settings.json` (project scope) declaring the
@@ -406,7 +439,7 @@ def write_gemini_settings(
                     session_token=session_token,
                     parent_tape_id=parent_tape_id,
                     bundle_id=bundle_id,
-                    recipe_id=recipe_id,
+                    cookbook_id=cookbook_id,
                     sandbox_id=sandbox_id,
                 ),
                 "trust": True,

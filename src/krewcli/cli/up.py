@@ -138,28 +138,6 @@ async def _ensure_cookbook(client, account_id: str, requested: str | None) -> st
     return cb_id
 
 
-async def _ensure_recipe(client, account_id: str, cookbook_id: str, requested: str | None) -> str:
-    """Pick or create a recipe inside the cookbook."""
-    if requested:
-        return requested
-    detail = await client.get_cookbook(cookbook_id)
-    recipes = detail.get("recipes", []) or []
-    if recipes:
-        rec = recipes[0]
-        click.echo(f"  Recipe:   {rec['id']}  ({rec.get('name', '')})")
-        return rec["id"]
-
-    click.echo("  No recipe in cookbook — creating 'my-recipe'…")
-    rec = await client.create_recipe(
-        name="my-recipe",
-        repo_url="",
-        created_by=account_id,
-        cookbook_id=cookbook_id,
-    )
-    click.echo(f"  Recipe:   {rec['id']}  (created)")
-    return rec["id"]
-
-
 def _autodetect_backends() -> list[str]:
     """Return every BACKEND_INFO entry whose CLI is on PATH (skip echo)."""
     return [
@@ -174,7 +152,6 @@ def _autodetect_backends() -> list[str]:
 @click.option("-p", "--password", default=None, envvar="KREWCLI_PASSWORD",
               help="krewauth password (or env KREWCLI_PASSWORD)")
 @click.option("--cookbook", default=None, help="Cookbook ID (optional, auto-resolved)")
-@click.option("--recipe", default=None, help="Recipe ID (optional, auto-resolved)")
 @click.option("--workdir", default=None, help="Working directory (default: cwd)")
 @click.option(
     "--agents",
@@ -189,7 +166,6 @@ def up_cmd(
     user: str | None,
     password: str | None,
     cookbook: str | None,
-    recipe: str | None,
     workdir: str | None,
     agents: str | None,
     max_concurrent: int,
@@ -220,8 +196,8 @@ def up_cmd(
     if not backends:
         raise click.ClickException("No backends resolved")
 
-    # 2) Login + cookbook/recipe resolution (uses an isolated event loop
-    #    so the daemon's loop later doesn't inherit a half-used client).
+    # 2) Login + cookbook resolution (uses an isolated event loop so
+    #    the daemon's loop later doesn't inherit a half-used client).
     async def _bootstrap():
         record = await _ensure_login(
             settings.krew_auth_url, user, password, settings.verify_ssl,
@@ -229,19 +205,17 @@ def up_cmd(
         client = _make_sync_client(settings)
         try:
             cb = await _ensure_cookbook(client, record["account_id"], cookbook)
-            rec = await _ensure_recipe(client, record["account_id"], cb, recipe)
-            return cb, rec
+            return cb
         finally:
             await client.close()
 
-    cb_id, rec_id = asyncio.run(_bootstrap())
+    cb_id = asyncio.run(_bootstrap())
 
     # 3) Print resolved config + start the daemon
     click.echo("")
     click.echo("krewcli up — agents bound to cookrew-beta")
     click.echo(f"  KrewHub:    {settings.krewhub_url}")
     click.echo(f"  Cookbook:   {cb_id}")
-    click.echo(f"  Recipe:     {rec_id}")
     click.echo(f"  Agents:     {', '.join(backends.keys())}")
     click.echo(f"  Work dir:   {resolved_workdir}")
     click.echo(f"  Concurrent: {max_concurrent}")
@@ -251,7 +225,6 @@ def up_cmd(
         settings=settings,
         backends=backends,
         cookbook_id=cb_id,
-        recipe_id=rec_id,
         working_dir=resolved_workdir,
         repo_url="",
         branch="main",

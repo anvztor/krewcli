@@ -256,7 +256,7 @@ def test_bridge_env_forwards_nonblocking_flag(monkeypatch):
 
     env = _bridge_env(
         krewhub_url="http://hub", task_id="t1", session_token="tok",
-        parent_tape_id="", bundle_id="b1", recipe_id="r1",
+        parent_tape_id="", bundle_id="b1", cookbook_id="cb1",
     )
     assert env["KREWHUB_DELEGATE_NONBLOCKING"] == "1"
     assert env["KREWHUB_DELEGATE_POLL_WINDOW_S"] == "20"
@@ -273,7 +273,7 @@ def test_bridge_env_omits_flag_when_not_set(monkeypatch):
 
     env = _bridge_env(
         krewhub_url="http://hub", task_id="t1", session_token="tok",
-        parent_tape_id="", bundle_id="b1", recipe_id="r1",
+        parent_tape_id="", bundle_id="b1", cookbook_id="cb1",
     )
     assert "KREWHUB_DELEGATE_NONBLOCKING" not in env
     assert "KREWHUB_DELEGATE_POLL_WINDOW_S" not in env

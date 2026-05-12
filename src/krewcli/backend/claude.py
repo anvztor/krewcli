@@ -137,7 +137,7 @@ async def _run_claude(
                 session_token=proc_env.get("KREWHUB_SESSION_TOKEN", ""),
                 parent_tape_id=proc_env.get("KREWHUB_PARENT_TAPE_ID", ""),
                 bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
-                recipe_id=proc_env.get("KREWHUB_RECIPE_ID", ""),
+                cookbook_id=proc_env.get("KREWHUB_COOKBOOK_ID", ""),
                 sandbox_id=proc_env.get("KREWHUB_SANDBOX_ID", ""),
             )
         except OSError as exc:

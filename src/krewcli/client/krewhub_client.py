@@ -111,34 +111,12 @@ class KrewHubClient:
         resp.raise_for_status()
         return resp.json()
 
-    # --- Recipes ---
-
-    async def list_recipes(self) -> list[dict[str, Any]]:
-        resp = await self._client.get("/api/v1/recipes")
-        resp.raise_for_status()
-        return resp.json()["recipes"]
-
-    async def get_recipe(self, recipe_id: str) -> dict[str, Any]:
-        resp = await self._client.get(f"/api/v1/recipes/{recipe_id}")
-        resp.raise_for_status()
-        return resp.json()
-
-    async def create_recipe(
-        self, name: str, repo_url: str, created_by: str, cookbook_id: str,
-    ) -> dict[str, Any]:
-        resp = await self._client.post("/api/v1/recipes", json={
-            "name": name,
-            "repo_url": repo_url,
-            "created_by": created_by,
-            "cookbook_id": cookbook_id,
-        })
-        resp.raise_for_status()
-        return resp.json()["recipe"]
-
     # --- Bundles ---
 
-    async def list_bundles(self, recipe_id: str) -> list[dict[str, Any]]:
-        resp = await self._client.get(f"/api/v1/recipes/{recipe_id}/bundles")
+    async def list_bundles(self, cookbook_id: str) -> list[dict[str, Any]]:
+        resp = await self._client.get(
+            f"/api/v1/cookbooks/{cookbook_id}/bundles",
+        )
         resp.raise_for_status()
         return resp.json()["bundles"]
 
@@ -149,9 +127,8 @@ class KrewHubClient:
 
     async def create_bundle(
         self,
-        recipe_id: str,
+        cookbook_id: str,
         prompt: str,
-        requested_by: str,
         tasks: list[dict[str, Any]],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Create a bundle with pre-defined tasks.
@@ -160,10 +137,9 @@ class KrewHubClient:
         Returns (bundle_dict, tasks_list).
         """
         resp = await self._client.post(
-            f"/api/v1/recipes/{recipe_id}/bundles",
+            f"/api/v1/cookbooks/{cookbook_id}/bundles",
             json={
                 "prompt": prompt,
-                "requested_by": requested_by,
                 "tasks": tasks,
             },
         )
@@ -206,11 +182,11 @@ class KrewHubClient:
 
     async def list_tasks(
         self,
-        recipe_id: str,
-        bundle_statuses: tuple[str, ...] = ("open", "claimed", "blocked", "cooked"),
+        cookbook_id: str,
+        bundle_statuses: tuple[str, ...] = ("open", "closed"),
     ) -> list[dict[str, Any]]:
         tasks: list[dict[str, Any]] = []
-        bundles = await self.list_bundles(recipe_id)
+        bundles = await self.list_bundles(cookbook_id)
 
         for bundle in bundles:
             if bundle.get("status") not in bundle_statuses:
@@ -319,30 +295,6 @@ class KrewHubClient:
         resp.raise_for_status()
         return resp.json().get("events", [])
 
-    async def post_recipe_event(
-        self,
-        recipe_id: str,
-        event_type: str,
-        actor_id: str,
-        body: str,
-        facts: list[dict] | None = None,
-        code_refs: list[dict] | None = None,
-    ) -> dict[str, Any]:
-        """Post an agent-level event (no bundle/task required)."""
-        resp = await self._client.post(
-            f"/api/v1/recipes/{recipe_id}/events",
-            json={
-                "type": event_type,
-                "actor_id": actor_id,
-                "actor_type": "agent",
-                "body": body,
-                "facts": facts or [],
-                "code_refs": code_refs or [],
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["event"]
-
     async def update_task_status(
         self, task_id: str, status: str, blocked_reason: str | None = None
     ) -> dict[str, Any]:
@@ -355,48 +307,6 @@ class KrewHubClient:
         )
         resp.raise_for_status()
         return resp.json()["task"]
-
-    # --- Digest ---
-
-    async def submit_digest(
-        self,
-        bundle_id: str,
-        submitted_by: str,
-        summary: str,
-        task_results: list[dict] | None = None,
-        facts: list[dict] | None = None,
-        code_refs: list[dict] | None = None,
-    ) -> dict[str, Any]:
-        resp = await self._client.post(
-            f"/api/v1/bundles/{bundle_id}/digest",
-            json={
-                "submitted_by": submitted_by,
-                "summary": summary,
-                "task_results": task_results or [],
-                "facts": facts or [],
-                "code_refs": code_refs or [],
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["digest"]
-
-    async def post_decision(
-        self,
-        bundle_id: str,
-        decision: str,
-        decided_by: str,
-        note: str | None = None,
-    ) -> dict[str, Any]:
-        resp = await self._client.post(
-            f"/api/v1/bundles/{bundle_id}/decision",
-            json={
-                "decision": decision,
-                "decided_by": decided_by,
-                "note": note,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["digest"]
 
     # --- Presence ---
 
@@ -493,17 +403,18 @@ class KrewHubClient:
 
     async def poll_claimable_tasks(
         self,
-        recipe_id: str,
+        cookbook_id: str,
     ) -> list[dict[str, Any]]:
         """Poll for open tasks whose dependencies are met.
 
         Returns tasks in ``open`` status from active bundles. The daemon
         filters locally by agent capabilities before attempting to claim.
         """
-        bundles = await self.list_bundles(recipe_id)
+        bundles = await self.list_bundles(cookbook_id)
         claimable: list[dict[str, Any]] = []
         for bundle in bundles:
-            if bundle.get("status") not in ("open", "claimed"):
+            # Bundle FSM collapsed to OPEN | CLOSED in anvztor/krewhub#1.
+            if bundle.get("status") != "open":
                 continue
             detail = await self.get_bundle(bundle["id"])
             done_ids = {
@@ -520,7 +431,7 @@ class KrewHubClient:
                         **task,
                         "bundle_id": bundle["id"],
                         "bundle_prompt": bundle.get("prompt", ""),
-                        "recipe_id": recipe_id,
+                        "cookbook_id": cookbook_id,
                     })
         return claimable
 

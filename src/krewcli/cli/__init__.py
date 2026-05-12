@@ -80,7 +80,7 @@ def main(ctx: click.Context) -> None:
 # ── Register command modules ──
 
 from krewcli.cli.join import register_join_commands, _resolve_mode, _default_model, _run_agent, _run_gateway  # noqa: E402
-from krewcli.cli.claim import register_claim_commands, _load_recipe_context  # noqa: E402
+from krewcli.cli.claim import register_claim_commands  # noqa: E402
 from krewcli.cli.tasks import register_task_commands, _run_task_worker, _run_task_worker_once  # noqa: E402
 from krewcli.cli.gateway_cmds import register_gateway_commands  # noqa: E402
 from krewcli.cli.daemon import register_daemon_commands  # noqa: E402
@@ -126,7 +126,6 @@ join = _attach_compat_attrs(
 start = _attach_compat_attrs(main.commands["start"], os=os)
 claim = _attach_compat_attrs(
     main.commands["claim"],
-    _load_recipe_context=_load_recipe_context,
     HeartbeatLoop=HeartbeatLoop,
     os=os,
 )
@@ -149,7 +148,6 @@ __all__ = [
     "_default_model",
     "_run_agent",
     "_run_gateway",
-    "_load_recipe_context",
     "_run_task_worker",
     "_run_task_worker_once",
     "_gateway_agent_metadata",

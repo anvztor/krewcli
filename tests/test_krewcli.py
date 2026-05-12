@@ -8,7 +8,7 @@ import httpx
 
 from krewcli.agents.models import TaskResult, FactRefResult, CodeRefResult
 from krewcli.agents.registry import AGENT_REGISTRY, get_agent_info
-from krewcli.cli import main, _load_recipe_context
+from krewcli.cli import main
 from krewcli.client.krewhub_client import KrewHubClient
 
 
@@ -81,7 +81,7 @@ async def test_krewhub_client_list_tasks_aggregates_bundle_data():
     client = KrewHubClient("http://127.0.0.1:8420", "test-key")
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/recipes/rec_1/bundles":
+        if request.url.path == "/api/v1/cookbooks/cb_1/bundles":
             return httpx.Response(
                 200,
                 json={
@@ -109,7 +109,7 @@ async def test_krewhub_client_list_tasks_aggregates_bundle_data():
     )
 
     try:
-        tasks = await client.list_tasks("rec_1")
+        tasks = await client.list_tasks("cb_1")
     finally:
         await client.close()
 
@@ -123,28 +123,6 @@ async def test_krewhub_client_list_tasks_aggregates_bundle_data():
             "bundle_prompt": "First bundle",
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_krewhub_client_post_decision():
-    client = KrewHubClient("http://127.0.0.1:8420", "test-key")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/bundles/bun_1/decision"
-        return httpx.Response(200, json={"digest": {"id": "dig_1", "bundle_id": "bun_1", "decision": "approved"}})
-
-    client._client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-        base_url="http://127.0.0.1:8420",
-        headers={"X-API-Key": "test-key"},
-    )
-
-    try:
-        digest = await client.post_decision("bun_1", "approved", "qa.lead", "Ship it")
-    finally:
-        await client.close()
-
-    assert digest["decision"] == "approved"
 
 
 @pytest.mark.asyncio
@@ -169,19 +147,3 @@ async def test_krewhub_client_post_event_uses_empty_payload_by_default():
     assert event == {"id": "evt_1"}
 
 
-@pytest.mark.asyncio
-async def test_load_recipe_context_uses_recipe_metadata():
-    class _RecipeClient:
-        async def get_recipe(self, recipe_id: str):
-            assert recipe_id == "rec_1"
-            return {
-                "recipe": {
-                    "repo_url": "git@github.com:test/repo.git",
-                    "default_branch": "release/test",
-                }
-            }
-
-    repo_url, branch = await _load_recipe_context(_RecipeClient(), "rec_1")
-
-    assert repo_url == "git@github.com:test/repo.git"
-    assert branch == "release/test"

@@ -67,20 +67,16 @@ async def _run_onboard(
     agent_names,
     max_concurrent,
 ):
-    """Interactive onboarding: clone cookbook, select recipes + agents, launch daemon."""
+    """Interactive onboarding: clone cookbook, select agents, launch daemon."""
     import shutil
 
     from krewcli.backend.registry import resolve_backends
     from krewcli.cookbook_repo import (
-        sanitize_name,
-        add_recipe_submodule,
         clone_or_fetch,
-        commit_and_push,
         configure_git_user,
-        sync_submodules,
     )
     from krewcli.daemon.loop import DaemonLoop
-    from krewcli.interactive import prompt_multi_select, prompt_single_select
+    from krewcli.interactive import prompt_multi_select
 
     from krewcli.auth.token_store import load_token as _lt
     client = KrewHubClient(
@@ -113,60 +109,12 @@ async def _run_onboard(
         await clone_or_fetch(clone_url, cookbook_dir)
         await configure_git_user(cookbook_dir, owner_id, f"{owner_id}@krew.local")
 
-        # 3. Fetch available recipes
-        cookbook_detail = await client.get_cookbook(cookbook_id)
-        recipes = cookbook_detail.get("recipes", [])
+        # Recipes were retired in anvztor/krewhub#1 — repos materialize
+        # per-bundle via repo_grants now, so onboard no longer adds
+        # submodules. Operators bring their working directory or rely
+        # on a follow-up repo-grant flow.
 
-        recipe_id = ""
-        if not recipes:
-            click.echo("\nNo recipes in this cookbook yet. Add recipes via krewhub first.")
-        else:
-            # 4. Interactive recipe selection
-            recipe_items = [
-                (r.get("name", r["id"]), r["id"])
-                for r in recipes
-            ]
-            selected_indices = prompt_multi_select("Recipes", recipe_items)
-            selected_recipes = [recipes[i] for i in selected_indices]
-            click.echo(f"\nSelected {len(selected_recipes)} recipe(s)")
-
-            # 5. Add selected recipes as submodules
-            added_any = False
-            for recipe in selected_recipes:
-                name = recipe.get("name", recipe["id"])
-                repo_url = recipe.get("repo_url", "")
-                branch = recipe.get("default_branch", "main")
-
-                if not repo_url:
-                    click.echo(f"  Skipping {name}: no repo_url")
-                    continue
-
-                added = await add_recipe_submodule(
-                    cookbook_dir, name, repo_url, branch=branch,
-                )
-                if added:
-                    click.echo(f"  Added submodule: {name}")
-                    added_any = True
-                else:
-                    click.echo(f"  Already present: {name}")
-
-            # 6. Push submodules
-            if added_any:
-                pushed = await commit_and_push(
-                    cookbook_dir, "onboard: add recipe submodules",
-                )
-                if pushed:
-                    click.echo("  Pushed to krewhub (indexing triggered)")
-
-            # 7. Sync submodules locally
-            await sync_submodules(cookbook_dir)
-            click.echo("  Submodules synced")
-
-            # Use first selected recipe for daemon
-            if selected_recipes:
-                recipe_id = selected_recipes[0]["id"]
-
-        # 8. Detect and select agents
+        # 3. Detect and select agents
         available_agents = [
             (entry.get("display_name", name), name)
             for name, entry in AGENT_REGISTRY.items()
@@ -182,7 +130,7 @@ async def _run_onboard(
             selected_agent_indices = prompt_multi_select("Agents", available_agents)
             resolved_agent_names = [available_agents[i][1] for i in selected_agent_indices]
 
-        # 9. Resolve backends
+        # 4. Resolve backends
         backends = resolve_backends(resolved_agent_names)
         if not backends:
             click.echo("No backends available.")
@@ -194,18 +142,15 @@ async def _run_onboard(
         click.echo(f"  Agents: {', '.join(backends.keys())}")
         click.echo(f"  KrewHub: {settings.krewhub_url}")
 
-        if not recipe_id:
-            click.echo("\nNo recipe selected. Daemon cannot start without a recipe.")
-            raise SystemExit(1)
+        click.echo(
+            f"\nDaemon starting for cookbook {cookbook_id}. Press Ctrl+C to stop.",
+        )
 
-        click.echo(f"\nDaemon starting for recipe {recipe_id}. Press Ctrl+C to stop.")
-
-        # 10. Launch daemon loop
+        # 5. Launch daemon loop
         daemon = DaemonLoop(
             client=client,
             backends=backends,
             cookbook_id=cookbook_id,
-            recipe_id=recipe_id,
             working_dir=cookbook_dir,
             max_concurrent=max_concurrent,
         )

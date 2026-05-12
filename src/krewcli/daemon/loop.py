@@ -88,7 +88,6 @@ class DaemonLoop:
             client=krewhub_client,
             backends={"claude": ClaudeBackend()},
             cookbook_id="my-cookbook",
-            recipe_id="my-recipe",
             working_dir="/path/to/repo",
         )
         await loop.run()  # runs until cancelled
@@ -99,7 +98,6 @@ class DaemonLoop:
         client: "KrewHubClient",
         backends: dict[str, Backend],
         cookbook_id: str,
-        recipe_id: str,
         working_dir: str,
         repo_url: str = "",
         branch: str = "",
@@ -110,7 +108,6 @@ class DaemonLoop:
         self._client = client
         self._backends = backends
         self._cookbook_id = cookbook_id
-        self._recipe_id = recipe_id
         self._working_dir = working_dir
         self._repo_url = repo_url
         self._branch = branch
@@ -135,7 +132,7 @@ class DaemonLoop:
 
         click.echo(f"  Daemon starting (owner={self._owner})")
         click.echo(f"  Backends: {list(self._backends.keys())}")
-        click.echo(f"  Recipe: {self._recipe_id}")
+        click.echo(f"  Cookbook: {self._cookbook_id}")
         click.echo(f"  Max concurrent: {self._max_concurrent}")
 
         # Track A1: krewhub requires a Bearer JWT minted by krewauth.
@@ -334,7 +331,7 @@ class DaemonLoop:
             return
 
         try:
-            tasks = await self._client.poll_claimable_tasks(self._recipe_id)
+            tasks = await self._client.poll_claimable_tasks(self._cookbook_id)
         except Exception:
             logger.debug("poll_claimable_tasks failed", exc_info=True)
             return
@@ -432,7 +429,7 @@ class DaemonLoop:
                 bundle_id=task.get("bundle_id", ""),
                 prompt=prompt,
                 task_detail=task,
-                metadata={"recipe_id": task.get("recipe_id", self._recipe_id)},
+                metadata={"cookbook_id": task.get("cookbook_id", self._cookbook_id)},
             )
             status = "done" if result.success else "blocked"
             click.echo(
@@ -497,7 +494,7 @@ class DaemonLoop:
                 task_id=task_id,
                 task_title=task_detail.get("title", ""),
                 task_description=task_detail.get("description", ""),
-                recipe_id=metadata.get("recipe_id", self._recipe_id),
+                cookbook_id=metadata.get("cookbook_id", self._cookbook_id),
                 krewhub_url=krewhub_url,
                 session_token=session_token,
                 bundle_id=bundle_id,
@@ -612,7 +609,7 @@ class DaemonLoop:
             return
 
         try:
-            bundles = await self._client.list_bundles(self._recipe_id)
+            bundles = await self._client.list_bundles(self._cookbook_id)
         except Exception:
             return
 

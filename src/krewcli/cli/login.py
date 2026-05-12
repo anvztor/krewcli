@@ -39,7 +39,7 @@ from krewcli.cli.daemon import (
     _now_iso,
     _run_daemon,
 )
-from krewcli.cli.up import _ensure_cookbook, _ensure_recipe
+from krewcli.cli.up import _ensure_cookbook
 from krewcli.config import get_settings
 from krewcli.daemon import supervisor
 
@@ -93,7 +93,6 @@ def _autodetect_backends() -> list[str]:
     help="Run the daemon in the foreground (blocking) instead of detaching.",
 )
 @click.option("--cookbook", default=None, help="Cookbook ID (optional, auto-resolved)")
-@click.option("--recipe", default=None, help="Recipe ID (optional, auto-resolved)")
 @click.option("--workdir", default=None, help="Working directory (default: cwd)")
 @click.option(
     "--agents",
@@ -108,7 +107,6 @@ def login_cmd(
     no_start: bool,
     foreground: bool,
     cookbook: str | None,
-    recipe: str | None,
     workdir: str | None,
     agents: str | None,
     max_concurrent: int,
@@ -181,17 +179,16 @@ def login_cmd(
         click.echo("  Use `krewcli daemon status` for details.")
         return
 
-    # 4) Resolve cookbook/recipe via the same helpers ``krewcli up`` uses.
+    # 4) Resolve cookbook via the same helper ``krewcli up`` uses.
     async def _bootstrap():
         client = _make_sync_client(settings)
         try:
             cb = await _ensure_cookbook(client, record["account_id"], cookbook)
-            rec = await _ensure_recipe(client, record["account_id"], cb, recipe)
-            return cb, rec
+            return cb
         finally:
             await client.close()
 
-    cb_id, rec_id = asyncio.run(_bootstrap())
+    cb_id = asyncio.run(_bootstrap())
 
     # 5) Foreground path — block on the daemon loop (same as krewcli up).
     if foreground:
@@ -199,7 +196,6 @@ def login_cmd(
         click.echo("krewcli login — agents online, watching for work")
         click.echo(f"  KrewHub:    {settings.krewhub_url}")
         click.echo(f"  Cookbook:   {cb_id}")
-        click.echo(f"  Recipe:     {rec_id}")
         click.echo(f"  Agents:     {', '.join(backends.keys())}")
         click.echo(f"  Work dir:   {resolved_workdir}")
         click.echo(f"  Concurrent: {max_concurrent}")
@@ -209,7 +205,6 @@ def login_cmd(
             settings=settings,
             backends=backends,
             cookbook_id=cb_id,
-            recipe_id=rec_id,
             working_dir=resolved_workdir,
             repo_url="",
             branch="main",
@@ -223,7 +218,6 @@ def login_cmd(
     #    writes its own ready marker once agents are registered.
     child_args = _build_foreground_args(
         cookbook_id=cb_id,
-        recipe_id=rec_id,
         workdir=resolved_workdir,
         agents=list(backends.keys()),
         max_concurrent=max_concurrent,
@@ -233,7 +227,6 @@ def login_cmd(
     )
     supervisor.write_status({
         "cookbook_id": cb_id,
-        "recipe_id": rec_id,
         "agents": list(backends.keys()),
         "workdir": resolved_workdir,
         "started_at": _now_iso(),
@@ -245,7 +238,6 @@ def login_cmd(
     click.echo("krewcli login — agents online")
     click.echo(f"  KrewHub:    {settings.krewhub_url}")
     click.echo(f"  Cookbook:   {cb_id}")
-    click.echo(f"  Recipe:     {rec_id}")
     click.echo(f"  Agents:     {', '.join(backends.keys())}")
     click.echo(f"  Work dir:   {resolved_workdir}")
     click.echo(f"  Daemon pid: {pid}")

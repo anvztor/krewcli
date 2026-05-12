@@ -280,19 +280,21 @@ class DaemonLoop:
         except Exception:
             task_detail = {}
 
-        # If prompt is empty, build one — conversation-aware, so a
-        # re-invocation after a human follow-up threads the prior
-        # dialog into the prompt instead of restarting from zero.
-        if not prompt.strip():
-            prompt = await _build_prompt_with_context(
-                {
-                    "id": task_id,
-                    "title": task_detail.get("title", ""),
-                    "description": task_detail.get("description", ""),
-                    "bundle_prompt": prompt,
-                },
-                self._client,
-            )
+        # Always build a conversation-aware prompt. The A2A payload's
+        # `prompt` carries the originating bundle prompt (e.g. the task
+        # title) but doesn't include the conversation history. We feed
+        # that as `bundle_prompt` and let the builder thread prior
+        # HUMAN/ASSISTANT turns from the task tape — required for the
+        # brain to remember earlier follow-ups on this same task.
+        prompt = await _build_prompt_with_context(
+            {
+                "id": task_id,
+                "title": task_detail.get("title", ""),
+                "description": task_detail.get("description", ""),
+                "bundle_prompt": prompt,
+            },
+            self._client,
+        )
 
         self._running_tasks.add(task_id)
         try:

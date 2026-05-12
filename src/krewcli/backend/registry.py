@@ -82,21 +82,51 @@ def resolve_backends(requested: list[str] | None = None) -> dict[str, Backend]:
 
     If ``requested`` is None, auto-detect available CLIs on PATH.
     The echo backend is included when ``KREWCLI_BACKEND_ECHO=1``.
+
+    Drops backends whose CLI isn't installed on PATH with a loud warning
+    (registration would otherwise advertise the agent as online, krewhub
+    would dispatch tasks to it, and every task would immediately fail
+    with "Codex CLI not found on PATH" — burning task generations).
+    Set ``KREWCLI_STRICT_BACKENDS=1`` to fail-fast instead of dropping.
     """
+    import logging
+    log = logging.getLogger(__name__)
     _ensure_registered()
 
+    strict = os.getenv("KREWCLI_STRICT_BACKENDS", "").strip().lower() in {"1", "true", "yes"}
+
     if requested is not None:
-        return {name: get_backend(name) for name in requested}
+        backends: dict[str, Backend] = {}
+        for name in requested:
+            backend = get_backend(name)
+            # is_available is duck-typed on the Backend protocol; backends
+            # without it are assumed available (e.g. echo).
+            if getattr(backend, "is_available", lambda: True)():
+                backends[name] = backend
+                continue
+            msg = (
+                f"backend {name!r} CLI not found on PATH "
+                f"(PATH={os.environ.get('PATH', '')[:200]})"
+            )
+            if strict:
+                raise RuntimeError(msg)
+            log.warning(
+                "%s — DROPPING from registration so krewhub won't "
+                "dispatch tasks to a non-functional agent. Install the "
+                "CLI or remove it from --agents to silence this.",
+                msg,
+            )
+        return backends
 
     # Auto-detect: check which CLIs are available.
-    backends: dict[str, Backend] = {}
+    backends = {}
     for name in _BACKEND_FACTORIES:
         if name == "echo":
             if os.getenv("KREWCLI_BACKEND_ECHO", "").strip().lower() in {"1", "true", "yes"}:
                 backends["echo"] = get_backend("echo")
             continue
         backend = get_backend(name)
-        # health() is async but we're in sync context — just include
-        # all non-echo backends; health check happens at daemon start.
+        if not getattr(backend, "is_available", lambda: True)():
+            continue
         backends[name] = backend
     return backends

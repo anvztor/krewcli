@@ -48,7 +48,9 @@ async def test_build_claude_args_includes_mcp_config(tmp_path):
     # 2026-05-09 — agent found a local checkout and lied "task done").
     assert "--allowed-tools" in args
     allowed_idx = args.index("--allowed-tools")
-    assert args[allowed_idx + 1] == "mcp__krewcli-bridge__delegate"
+    allowed_tools_val = args[allowed_idx + 1]
+    assert "mcp__krewcli-bridge__delegate" in allowed_tools_val
+    assert "mcp__krewcli-bridge__hitl.request_access" in allowed_tools_val
     assert "-p" in args
     assert "do the thing" in args
 

@@ -84,11 +84,6 @@ async def _run_codex(
     }
     proc_env = {**safe_env, **filtered_extra}
 
-    # Inject operator's stored credentials (Path-B vault) so mcp__github__*
-    # and friends inherit GITHUB_TOKEN etc. Best-effort.
-    from krewcli.daemon.execenv import ExecutionEnvironment as _Execenv
-    await _Execenv.merge_vault_envs_into(proc_env)
-
     # Per-task delegate wiring (Three Hands Protocol). Mirrors
     # `claude.py` but routes through `CODEX_HOME/config.toml` because
     # codex doesn't accept --mcp-config / --append-system-prompt flags.

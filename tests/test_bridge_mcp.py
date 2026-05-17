@@ -298,7 +298,7 @@ async def test_handle_initialize_request():
 
 @pytest.mark.asyncio
 async def test_handle_tools_list_returns_delegate():
-    """JSON-RPC `tools/list` returns exactly one tool: `delegate`."""
+    """JSON-RPC `tools/list` returns `delegate` and `hitl.request_access`."""
     from krewcli.mcp_servers.bridge import handle_message
 
     resp = await handle_message({
@@ -307,9 +307,11 @@ async def test_handle_tools_list_returns_delegate():
         "method": "tools/list",
     })
     tools = resp["result"]["tools"]
-    assert len(tools) == 1
-    assert tools[0]["name"] == "delegate"
-    schema = tools[0]["inputSchema"]
+    names = [t["name"] for t in tools]
+    assert "delegate" in names
+    assert "hitl.request_access" in names
+    delegate_tool = next(t for t in tools if t["name"] == "delegate")
+    schema = delegate_tool["inputSchema"]
     assert "to" in schema["properties"]
     assert "input" in schema["properties"]
     assert "to" in schema["required"]

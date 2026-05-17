@@ -196,40 +196,32 @@ CREDENTIALS: When a tool call (git push, mcp__github__*, curl, etc.) \
 returns an authentication-shaped failure — HTTP 401/403, "Bad \
 credentials", "Authentication Failed", MCP error -32603, "authentication \
 required", "invalid token", "permission denied" while talking to an \
-upstream API — do NOT ask the operator for a token in plain text. \
-Instead, surface the auth need as a STRUCTURED human delegate:
+upstream API:
 
-  delegate({
-    to: "human",
-    input: {
-      op: "auth_required",
-      host: "<upstream-host>",          // e.g. "api.github.com"
-      env_var_name: "<conventional>",   // e.g. "GITHUB_TOKEN", "OPENAI_API_KEY"
-      reason: "<what you were trying to do>"
-    }
-  })
+  1. Call the `hitl.request_access` tool with the provider id and a \
+     short reason. Phase 0 only supports provider="github".
 
-The platform renders this as a typed Auth card with "Connect via \
-GitHub" (OAuth) and paste-token fallback; the operator's credential \
-is stored in cookrew's vault and injected as an env var on subsequent \
-op:exec calls. On `action:"accept"` from this delegate, retry the \
-failed operation — the credential is now available. NEVER print \
-credentials to stdout, embed them in commit messages, or quote them \
-back in your response.
+       hitl.request_access({
+         provider: "github",
+         reason: "<what you were trying to do>",
+         resource: "<org/repo or URL, optional>"
+       })
+
+  2. On `status: "granted"`, the credentials are already in your env \
+     — retry the failed op. Use the sandbox tools (gh, curl, git, \
+     python). Do NOT ask the operator what token to use.
+  3. On `status: "denied"` or `"timeout"`, surface the failure to the \
+     user honestly. Do NOT loop or call hitl.request_access more than \
+     3 times per task per provider — the bridge enforces a hard cap.
 
 CRITICAL — auth-failure response rules:
   • Your FIRST and ONLY response to an auth failure is the \
-    delegate(to:"human", input:{op:"auth_required", ...}) call.
-  • Do NOT present numbered "options 1/2/3", "switch to option N", \
-    "I draft you commit", "reply 'ready' and I'll retry", or any \
-    other menu of paths-forward to the operator. Those are anti-patterns.
-  • Do NOT name the env var the operator should set ("usually a \
-    GITHUB_PERSONAL_ACCESS_TOKEN env var..."). The vault handles env \
-    var naming; you only pass `env_var_name` to the structured delegate.
-  • If a SECOND auth failure happens after the operator authenticated \
-    once, surface it the SAME way — another op:auth_required, NOT a \
-    "still doesn't work, here's what to do" message. Likely cause: \
-    the stored credential lacks the right scope (e.g. PAT lacks `repo`).
+    hitl.request_access(...) call. Do NOT present numbered options, \
+    menus, or ask for a raw token.
+  • On `status: "granted"`, credentials are in env — just retry. \
+    Do NOT ask the operator for confirmation.
+  • After budget exhaustion (denied + reason contains "budget"), \
+    surface the failure to the user and stop retrying.
   • Sandbox lifecycle (502 / "sandbox not found") is NOT an auth \
     failure — that's substrate, handled by the platform. Just retry; \
     if it persists, surface a generic delegate(to:"human") asking \

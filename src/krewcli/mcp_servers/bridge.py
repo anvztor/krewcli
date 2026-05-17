@@ -1,8 +1,18 @@
-"""krewcli-bridge — stdio MCP server exposing the `delegate` tool.
+"""krewcli-bridge — stdio MCP server exposing the `delegate` tool
+and the `hitl.request_access` tool.
 
 Runs inside the e2b sandbox alongside `claude -p`. Bridges the
 single tool surface a brain needs (`delegate(target, input, ...)`) to
 krewhub's `/api/v1/invocations` HTTP API.
+
+Also exposes `hitl.request_access` — the Phase 0 credential gateway.
+When the brain hits 401/403 on an upstream API it calls this tool
+instead of asking the operator for a raw token via delegate(human).
+The bridge emits op:auth_required on the elicit channel; krewhub's
+HumanHand durably records it and resolves it once the operator connects
+via OAuth or pastes a token. task_id is derived server-side from
+KREWHUB_TASK_ID (set at spawn time) — the brain cannot supply or vary
+it, so the per-task grant budget cannot be forged.
 
 Aligned with Anthropic Managed Agents' `execute(name, input) → string`
 primitive. The model sees one verb; the bridge handles the round-trip.
@@ -15,7 +25,7 @@ Run: `python -m krewcli.mcp_servers.bridge`
 Required env vars:
 - KREWHUB_URL              base URL (e.g. http://krewhub:8420)
 - KREWHUB_SESSION_TOKEN    bearer for `/api/v1/invocations`
-- KREWHUB_TASK_ID          surfaced for telemetry
+- KREWHUB_TASK_ID          surfaced for telemetry + hitl budget key
 - KREWHUB_PARENT_TAPE_ID   default parent for delegate's child tape
 
 Optional:
@@ -45,13 +55,36 @@ from typing import Any
 
 import httpx
 
+from krewcli.mcp_servers.hitl_tool import HitlTool
+
 
 logger = logging.getLogger("krewcli.bridge")
 
 
 # ---------------------------------------------------------------------------
-# Tool definition (MCP `tools/list` shape)
+# Tool definitions (MCP `tools/list` shape)
 # ---------------------------------------------------------------------------
+
+
+HITL_TOOL_DEF: dict = {
+    "name": "hitl.request_access",
+    "description": (
+        "Ask the human for permission to access a third-party platform. "
+        "Call this when an upstream API returns 401/403 / Bad credentials. "
+        "On status=granted, credentials are already in env; retry the failed op. "
+        "On denied/timeout, surface the failure to the user — do NOT loop."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "provider": {"type": "string", "enum": ["github"]},
+            "reason":   {"type": "string", "minLength": 1, "maxLength": 2000},
+            "resource": {"type": "string"},
+        },
+        "required": ["provider", "reason"],
+        "additionalProperties": False,
+    },
+}
 
 
 DELEGATE_TOOL_DEF: dict = {
@@ -158,6 +191,82 @@ def _headers() -> dict[str, str]:
     if tok:
         h["Authorization"] = f"Bearer {tok}"
     return h
+
+
+# ---------------------------------------------------------------------------
+# HITL elicit emitter + resolver — krewhub HTTP wrappers
+# ---------------------------------------------------------------------------
+
+
+class _KrewhubElicitEmitter:
+    """POST op:auth_required to krewhub's elicit endpoint for a task.
+
+    Endpoint: POST /api/v1/invocations/<task_id>/task
+    Body:     {op: "auth_required", provider: ..., reason: ..., resource?: ...}
+    Returns:  {elicit_id: "<id>"}
+    """
+
+    async def emit_elicit(self, *, payload: dict, task_id: str) -> str:
+        base = _krewhub_url()
+        if not base:
+            raise RuntimeError("bridge_misconfig: KREWHUB_URL unset")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{base}/api/v1/invocations/{task_id}/task",
+                json=payload,
+                headers=_headers(),
+            )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"emit_elicit failed: {resp.status_code} {resp.text[:200]}"
+            )
+        body = resp.json()
+        elicit_id = body.get("elicit_id") or body.get("id")
+        if not elicit_id:
+            raise RuntimeError(f"emit_elicit: missing elicit_id in response: {body!r}")
+        return str(elicit_id)
+
+
+class _KrewhubElicitResolver:
+    """Long-poll krewhub until an elicit resolves (action=accept|reject).
+
+    Endpoint: GET /api/v1/invocations/<task_id>/task/<elicit_id>
+    Returns: {action: "accept"|"reject", reason?: ...}
+
+    Polls every 0.5s until action is terminal.
+    """
+
+    async def wait_for_resolution(self, *, task_id: str, elicit_id: str) -> dict:
+        base = _krewhub_url()
+        if not base:
+            raise RuntimeError("bridge_misconfig: KREWHUB_URL unset")
+        poll_timeout = float(os.environ.get("KREWHUB_POLL_TIMEOUT_S", "30"))
+        url = f"{base}/api/v1/invocations/{task_id}/task/{elicit_id}"
+        async with httpx.AsyncClient(timeout=poll_timeout) as client:
+            while True:
+                resp = await client.get(url, headers=_headers())
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"wait_for_resolution poll failed: {resp.status_code} {resp.text[:200]}"
+                    )
+                body = resp.json()
+                action = body.get("action")
+                if action in ("accept", "reject", "decline", "cancel"):
+                    return body
+                # Not yet resolved — short backoff.
+                await asyncio.sleep(0.5)
+
+
+# Module-level singleton (created lazily per-session via task_id from env).
+# task_id_provider reads KREWHUB_TASK_ID from the bridge's env — set by
+# the daemon's execenv at spawn time and never supplied by the agent.
+_hitl_emitter = _KrewhubElicitEmitter()
+_hitl_resolver = _KrewhubElicitResolver()
+_hitl_tool = HitlTool(
+    emitter=_hitl_emitter,
+    resolver=_hitl_resolver,
+    task_id_provider=lambda: os.environ.get("KREWHUB_TASK_ID", ""),
+)
 
 
 def _generate_idempotency_key(parent_tape_id: str, args: dict) -> str:
@@ -367,25 +476,38 @@ async def handle_message(msg: dict) -> dict | None:
                 "serverInfo": {"name": "krewcli-bridge", "version": "0.1.0"},
             }
         elif method == "tools/list":
-            result = {"tools": [DELEGATE_TOOL_DEF]}
+            result = {"tools": [DELEGATE_TOOL_DEF, HITL_TOOL_DEF]}
         elif method == "tools/call":
             params = msg.get("params") or {}
             name = params.get("name")
-            if name != "delegate":
+            args = params.get("arguments") or {}
+            if name == "delegate":
+                envelope = await delegate(args)
+                result = {
+                    "content": [
+                        {"type": "text", "text": json.dumps(envelope)},
+                    ],
+                    "isError": envelope.get("action") == "error",
+                }
+            elif name == "hitl.request_access":
+                hitl_result = await _hitl_tool.request_access(
+                    provider=args.get("provider", ""),
+                    reason=args.get("reason", ""),
+                    resource=args.get("resource") or None,
+                )
+                result = {
+                    "content": [
+                        {"type": "text", "text": json.dumps(hitl_result)},
+                    ],
+                    "isError": hitl_result.get("status") not in ("granted", "denied", "timeout"),
+                }
+            else:
                 if is_notification:
                     return None
                 return _error_response(
                     msg_id, -32602,
-                    f"unknown_tool: {name!r} (only 'delegate' is exposed)",
+                    f"unknown_tool: {name!r} (known tools: 'delegate', 'hitl.request_access')",
                 )
-            args = params.get("arguments") or {}
-            envelope = await delegate(args)
-            result = {
-                "content": [
-                    {"type": "text", "text": json.dumps(envelope)},
-                ],
-                "isError": envelope.get("action") == "error",
-            }
         elif method.startswith("notifications/"):
             # Client lifecycle notification — silent ack.
             return None
@@ -409,6 +531,55 @@ def _error_response(msg_id: Any, code: int, message: str) -> dict:
         "id": msg_id,
         "error": {"code": code, "message": message},
     }
+
+
+# ---------------------------------------------------------------------------
+# BridgeSession — thin wrapper used by tests + future callers
+# ---------------------------------------------------------------------------
+
+
+class BridgeSession:
+    """Thin in-process bridge session.
+
+    Wraps a HitlTool instance bound to a known task_id. Used by tests
+    (bridge_for_task fixture) and could be used by an embedder that
+    wants to call the bridge in-process rather than over stdio.
+    """
+
+    def __init__(self, task_id: str) -> None:
+        self._task_id = task_id
+        self._hitl = HitlTool(
+            emitter=_hitl_emitter,
+            resolver=_hitl_resolver,
+            task_id_provider=lambda: self._task_id,
+        )
+
+    async def list_tools(self) -> list[dict]:
+        resp = await handle_message({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+        })
+        return (resp or {}).get("result", {}).get("tools", [])
+
+    async def call_tool(self, name: str, *, arguments: dict) -> dict:
+        if name == "hitl.request_access":
+            return await self._hitl.request_access(
+                provider=arguments.get("provider", ""),
+                reason=arguments.get("reason", ""),
+                resource=arguments.get("resource") or None,
+            )
+        # Delegate falls through to the module-level delegate() function.
+        resp = await handle_message({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        })
+        content = (resp or {}).get("result", {}).get("content", [])
+        if content:
+            return json.loads(content[0].get("text", "{}"))
+        return {}
 
 
 # ---------------------------------------------------------------------------

@@ -40,12 +40,14 @@ class EchoBackend:
         loop = asyncio.get_running_loop()
         result_future: asyncio.Future[BackendResult] = loop.create_future()
 
-        asyncio.create_task(
+        runner = asyncio.create_task(
             _run_echo(prompt, working_dir, queue, result_future),
             name="echo-backend",
         )
 
-        return BackendSession(messages=queue, result_future=result_future)
+        return BackendSession(
+            messages=queue, result_future=result_future, runner=runner,
+        )
 
 
 async def _run_echo(

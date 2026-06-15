@@ -87,6 +87,57 @@ HITL_TOOL_DEF: dict = {
 }
 
 
+SPAWN_SUBTASK_TOOL_DEF: dict = {
+    "name": "spawn_subtask",
+    "description": (
+        "Decompose your goal: create a child subtask under the task you "
+        "orchestrate and link it as your sub-agent. Use this when the work "
+        "splits into a unit a worker should own end-to-end. The child is "
+        "created with provenance (created_by_task = your task), a subagent "
+        "link is drawn (purple arrow on the board), and the worker's Report "
+        "flows back onto YOUR tape when it completes — you'll see it as a "
+        "'Child report' on your next turn. This is your ONLY way to spawn "
+        "work; do not try to do a subtask's work yourself. Returns the new "
+        "task_id and link_id."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "required": ["title", "brief"],
+        "properties": {
+            "title": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "Short imperative title for the child task.",
+            },
+            "brief": {
+                "type": "object",
+                "required": ["goal", "deliverable"],
+                "description": (
+                    "Structured hand-off to the worker. goal + deliverable "
+                    "are required; the rest sharpen the contract."
+                ),
+                "properties": {
+                    "goal": {"type": "string"},
+                    "deliverable": {"type": "string"},
+                    "context": {"type": "string"},
+                    "constraints": {
+                        "type": "array", "items": {"type": "string"},
+                    },
+                    "report_points": {
+                        "type": "array", "items": {"type": "string"},
+                    },
+                },
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional free-text description (worker prompt).",
+            },
+        },
+        "additionalProperties": False,
+    },
+}
+
+
 DELEGATE_TOOL_DEF: dict = {
     "name": "delegate",
     "description": (
@@ -449,6 +500,67 @@ async def delegate(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# spawn_subtask() — orch-agent's decompose primitive (POST /tasks/{A}/links)
+# ---------------------------------------------------------------------------
+
+
+async def spawn_subtask(args: dict) -> dict:
+    """Create a child subtask under the orchestrated task and subagent-link
+    it. POSTs ``new_task`` to ``/api/v1/tasks/{KREWHUB_TASK_ID}/links`` with
+    ``kind="subagent"`` — the API form of infinite-scroll's ``new-cell``.
+
+    The parent task id is read from ``KREWHUB_TASK_ID`` (set at spawn time
+    by the orch loop's exec env) and CANNOT be supplied by the brain, so a
+    sub-agent cannot re-parent a task it doesn't own. Returns a small
+    ``{ok, task_id, link_id, title}`` envelope the model can act on.
+    """
+    base = _krewhub_url()
+    if not base:
+        return {"ok": False, "error": "bridge_misconfig: KREWHUB_URL unset"}
+
+    parent_task_id = os.environ.get("KREWHUB_TASK_ID", "").strip()
+    if not parent_task_id:
+        return {"ok": False, "error": "no_parent_task: KREWHUB_TASK_ID unset"}
+
+    title = (args.get("title") or "").strip()
+    if not title:
+        return {"ok": False, "error": "title is required"}
+    brief = args.get("brief")
+    if not isinstance(brief, dict) or not brief.get("goal") or not brief.get("deliverable"):
+        return {"ok": False, "error": "brief.goal and brief.deliverable are required"}
+
+    new_task: dict = {"title": title, "brief": brief}
+    description = args.get("description")
+    if isinstance(description, str) and description.strip():
+        new_task["description"] = description
+
+    body = {"new_task": new_task, "kind": "subagent"}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{base}/api/v1/tasks/{parent_task_id}/links",
+                json=body,
+                headers=_headers(),
+            )
+        if resp.status_code not in (200, 201):
+            return {
+                "ok": False,
+                "error": f"create_link_failed: {resp.status_code} {resp.text[:200]}",
+            }
+        payload = resp.json()
+        link = payload.get("link") or {}
+        to_task = payload.get("to_task") or {}
+        return {
+            "ok": True,
+            "task_id": to_task.get("id") or link.get("to_task_id"),
+            "link_id": link.get("id"),
+            "title": title,
+        }
+    except Exception as exc:  # noqa: BLE001 — failures are values for the brain
+        return {"ok": False, "error": f"bridge_exception: {exc}"}
+
+
+# ---------------------------------------------------------------------------
 # JSON-RPC 2.0 stdio handler
 # ---------------------------------------------------------------------------
 
@@ -476,7 +588,14 @@ async def handle_message(msg: dict) -> dict | None:
                 "serverInfo": {"name": "krewcli-bridge", "version": "0.1.0"},
             }
         elif method == "tools/list":
-            result = {"tools": [DELEGATE_TOOL_DEF, HITL_TOOL_DEF]}
+            tools = [DELEGATE_TOOL_DEF, HITL_TOOL_DEF]
+            # spawn_subtask is only meaningful for an orch-agent (the
+            # brain that owns a task and decomposes it). Advertise it
+            # only when the loop set KREWCLI_ORCH_AGENT in the bridge
+            # env — workers never see it, so a worker cannot spawn.
+            if os.environ.get("KREWCLI_ORCH_AGENT") == "1":
+                tools.append(SPAWN_SUBTASK_TOOL_DEF)
+            result = {"tools": tools}
         elif method == "tools/call":
             params = msg.get("params") or {}
             name = params.get("name")
@@ -501,12 +620,31 @@ async def handle_message(msg: dict) -> dict | None:
                     ],
                     "isError": hitl_result.get("status") not in ("granted", "denied", "timeout"),
                 }
+            elif name == "spawn_subtask":
+                # Defense in depth: even if a worker bridge somehow received
+                # this call, it only executes for an orch-agent. tools/list
+                # already hides it from workers; this guards tools/call too.
+                if os.environ.get("KREWCLI_ORCH_AGENT") != "1":
+                    if is_notification:
+                        return None
+                    return _error_response(
+                        msg_id, -32602,
+                        "spawn_subtask is only available to an orch-agent",
+                    )
+                spawn_result = await spawn_subtask(args)
+                result = {
+                    "content": [
+                        {"type": "text", "text": json.dumps(spawn_result)},
+                    ],
+                    "isError": not spawn_result.get("ok", False),
+                }
             else:
                 if is_notification:
                     return None
                 return _error_response(
                     msg_id, -32602,
-                    f"unknown_tool: {name!r} (known tools: 'delegate', 'hitl.request_access')",
+                    f"unknown_tool: {name!r} (known tools: 'delegate', "
+                    f"'hitl.request_access', 'spawn_subtask')",
                 )
         elif method.startswith("notifications/"):
             # Client lifecycle notification — silent ack.

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -527,6 +528,106 @@ class KrewHubClient:
         )
         resp.raise_for_status()
         return resp.json()["task"]
+
+    # ────────────────────────────────────────────────────────────
+    # Orch mode (gap 5) — links + multi-stream watch for the brain
+    # ────────────────────────────────────────────────────────────
+
+    async def create_link(
+        self,
+        from_task_id: str,
+        *,
+        kind: str = "subagent",
+        to_task_id: str | None = None,
+        new_task: dict[str, Any] | None = None,
+        payload_map: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a data-flow edge from ``from_task_id`` (design §5).
+
+        Exactly one of ``to_task_id`` (link an existing task) or
+        ``new_task`` (create the downstream inline, provenance-stamped
+        ``created_by_task = from_task_id``) must be given. ``new_task``
+        is ``{"title": str, "description"?: str, "brief"?: {...}}``.
+
+        This is the orch-agent's spawn primitive — POST /tasks/{A}/links
+        with ``new_task`` + ``kind="subagent"`` is the API form of
+        infinite-scroll's ``new-cell``. Returns ``{"link": {...},
+        "to_task": {...}}``.
+        """
+        body: dict[str, Any] = {"kind": kind}
+        if (to_task_id is None) == (new_task is None):
+            raise ValueError("exactly one of to_task_id or new_task is required")
+        if to_task_id is not None:
+            body["to_task_id"] = to_task_id
+        if new_task is not None:
+            body["new_task"] = new_task
+        if payload_map:
+            body["payload_map"] = payload_map
+        resp = await self._client.post(
+            f"/api/v1/tasks/{from_task_id}/links",
+            json=body,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_bundle_links(
+        self,
+        bundle_id: str,
+        *,
+        include_revoked: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List a bundle's task links (both directions, all tasks).
+
+        The brain's local view of the orchestration graph. Used by the
+        subtree reconcile to walk A's children. ``GET /tasks/{id}/links``
+        (B5) is per-task; until that ships the bundle-scoped endpoint is
+        a superset the orch loop filters locally.
+        """
+        resp = await self._client.get(
+            f"/api/v1/bundles/{bundle_id}/links",
+            params={"include_revoked": str(include_revoked).lower()},
+        )
+        resp.raise_for_status()
+        return resp.json().get("links", [])
+
+    async def watch(
+        self,
+        *,
+        channel: str | None = None,
+        resource_type: str | None = None,
+        since: int = 0,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream krewhub watch events as parsed dicts (multi-stream SSE).
+
+        Yields ``{type, resource_type, resource_id, resource_version,
+        object, seq, channel}`` for each event. Reuses the client's
+        Bearer auth so the orch-agent can subscribe to ``channel=task:*``
+        scoped to its bundle's subtree — the C2 multi-task subscription.
+
+        This is a long-lived generator: callers iterate until they stop
+        consuming (or the connection drops, which raises). Dedup by
+        ``seq`` is the caller's responsibility — pass the last-seen seq
+        as ``since`` on reconnect to replay missed events with no gaps.
+        """
+        params: dict[str, str] = {"since": str(since)}
+        if channel:
+            params["channel"] = channel
+        if resource_type:
+            params["resource_type"] = resource_type
+        async with self._client.stream(
+            "GET", "/api/v1/watch", params=params, timeout=None,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
+                try:
+                    yield json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
 
     async def get_working_tasks(
         self,

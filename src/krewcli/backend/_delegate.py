@@ -229,6 +229,50 @@ CRITICAL — auth-failure response rules:
 """
 
 
+ORCH_SYSTEM_NOTE = """\
+You are the ORCHESTRATOR (Row 0) for one task — the LLM brain that owns a \
+goal and decomposes it. You DO NOT do the work yourself: you have no \
+sandbox, no editor, no shell. Your job is to think, split the goal into \
+subtasks, spawn workers, read what they report back, and decide what to \
+do next. Orchestration intelligence lives in you, never in the tool.
+
+Your tools (exposed via the krewcli-bridge MCP server):
+
+  spawn_subtask({ title, brief: { goal, deliverable, context?, \
+constraints?, report_points? }, description? })
+    → Create a child subtask and link it as your sub-agent. A worker \
+      will claim it, do the work, and its Report flows back onto YOUR \
+      tape — you'll see it as a "Child report" on a later turn. Returns \
+      { ok, task_id, link_id }. This is your ONLY way to get work done. \
+      Spawn one subtask per independent unit of work.
+
+  delegate({ to: "human", input, schema? })
+    → Escalate to the human operator (a decision, an approval, missing \
+      context). Returns a ResultEnvelope; may be `pending` (answer \
+      arrives on a later turn as a HUMAN message). Use this sparingly — \
+      only when you genuinely need a human decision.
+
+How a turn works:
+  • On your FIRST turn you see the goal. Decompose it: call \
+    spawn_subtask once per subtask. Keep briefs tight (a clear goal + a \
+    concrete deliverable). Then end your turn — you'll wake when a \
+    child reports.
+  • On LATER turns you see "Child reports" (a worker finished and \
+    reported up) and the current state of your subtree. Read each \
+    report. Decide per child: accept it (do nothing), spawn a \
+    follow-up subtask (if more work is needed or it was blocked), or \
+    escalate to the human. Then end your turn.
+  • When every subtask is done and the goal is satisfied, say so \
+    clearly in your reply and stop spawning. Do not spawn duplicate \
+    work — check the subtree state first; a child that is already \
+    `working` or `done` does not need re-spawning.
+
+End each turn with a short `agent_reply` summarizing what you decided \
+and why (what you spawned, what you're waiting on, or that you're done). \
+Never claim a subtask is done until you've seen its Child report.\
+"""
+
+
 # ---------------------------------------------------------------------------
 # MCP-server descriptor (consumed by all three writers below)
 # ---------------------------------------------------------------------------
@@ -243,6 +287,7 @@ def _bridge_env(
     bundle_id: str,
     cookbook_id: str,
     sandbox_id: str = "",
+    orch: bool = False,
 ) -> dict[str, str]:
     env = {
         "KREWHUB_URL": krewhub_url,
@@ -252,6 +297,12 @@ def _bridge_env(
         "KREWHUB_COOKBOOK_ID": cookbook_id,
         "KREWHUB_PARENT_TAPE_ID": parent_tape_id,
     }
+    # Orch-agent: unlock the `spawn_subtask` tool in the bridge so the
+    # brain can decompose its goal into child subtasks (gap 5, C3). The
+    # bridge only advertises spawn_subtask when this is "1", so workers
+    # never see it — a worker cannot spawn children.
+    if orch:
+        env["KREWCLI_ORCH_AGENT"] = "1"
     # The bridge reads KREWHUB_SANDBOX_ID to auto-resolve bare
     # `delegate(to: "sandbox", ...)`; without it that target errors with
     # `no_sandbox_attached`.
@@ -294,10 +345,12 @@ def write_claude_mcp_config(
     bundle_id: str,
     cookbook_id: str,
     sandbox_id: str = "",
+    orch: bool = False,
 ) -> str:
     """Generate the JSON `--mcp-config` file claude expects.
 
-    Same workdir + same task → same file path → idempotent.
+    Same workdir + same task → same file path → idempotent. When
+    ``orch`` is set the bridge env unlocks ``spawn_subtask`` (gap 5).
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -318,6 +371,7 @@ def write_claude_mcp_config(
                     bundle_id=bundle_id,
                     cookbook_id=cookbook_id,
                     sandbox_id=sandbox_id,
+                    orch=orch,
                 ),
             }
         }
@@ -509,6 +563,7 @@ def _toml_key(key: str) -> str:
 # Re-exports for backwards compatibility with claude.py imports.
 __all__ = [
     "DELEGATE_SYSTEM_NOTE",
+    "ORCH_SYSTEM_NOTE",
     "write_claude_mcp_config",
     "write_codex_home",
     "write_gemini_settings",

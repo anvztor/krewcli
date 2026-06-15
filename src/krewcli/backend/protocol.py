@@ -55,9 +55,15 @@ class BackendSession:
         self,
         messages: asyncio.Queue[BackendMessage | None],
         result_future: asyncio.Future[BackendResult],
+        runner: "asyncio.Task | None" = None,
     ) -> None:
         self._messages = messages
         self._result_future = result_future
+        # Handle to the background task driving the backend subprocess.
+        # A persistent caller (e.g. the orch loop, which spawns a brain
+        # every turn and never exits) MUST be able to cancel it on turn
+        # failure/shutdown, or the detached task + its child process leak.
+        self._runner = runner
 
     async def messages_iter(self) -> AsyncIterator[BackendMessage]:
         """Yield messages until the backend signals completion."""
@@ -70,6 +76,21 @@ class BackendSession:
     async def result(self) -> BackendResult:
         """Await the terminal result (blocks until execution finishes)."""
         return await self._result_future
+
+    async def aclose(self) -> None:
+        """Cancel the backing runner task if it's still running.
+
+        Idempotent and safe to call after normal completion (the runner
+        has already returned, so cancel is a no-op). Backends that drive a
+        subprocess should kill it on cancellation."""
+        runner = self._runner
+        if runner is None or runner.done():
+            return
+        runner.cancel()
+        try:
+            await runner
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @runtime_checkable

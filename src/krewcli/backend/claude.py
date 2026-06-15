@@ -16,6 +16,7 @@ import shutil
 
 from krewcli.backend._delegate import (
     DELEGATE_SYSTEM_NOTE as _DELEGATE_SYSTEM_NOTE,
+    ORCH_SYSTEM_NOTE as _ORCH_SYSTEM_NOTE,
     delegate_wiring_active,
     write_claude_mcp_config,
 )
@@ -36,9 +37,15 @@ def build_claude_args(
     *,
     prompt: str,
     mcp_config_path: str | None = None,
+    orch: bool = False,
 ) -> list[str]:
     """Assemble the `claude` CLI argv. Bridge MCP server is wired in
-    when `mcp_config_path` is supplied."""
+    when `mcp_config_path` is supplied.
+
+    When ``orch`` is set, the tool surface and system note switch to the
+    orchestrator's: ``spawn_subtask`` is unlocked (gap 5) and the brain
+    is told to decompose+delegate, never to do the work itself.
+    """
     args: list[str] = [
         "claude",
         "--output-format", "stream-json",
@@ -50,22 +57,22 @@ def build_claude_args(
         "--disallowedTools", "AskUserQuestion",
     ]
     if mcp_config_path:
+        # Lock the tool surface. Workers get delegate+hitl (route all
+        # work through the bundle's e2b sandbox); the orch-agent ALSO
+        # gets spawn_subtask but no sandbox — it only decomposes and
+        # delegates, never edits files on the daemon host.
+        allowed = "mcp__krewcli-bridge__delegate,mcp__krewcli-bridge__hitl.request_access"
+        if orch:
+            allowed += ",mcp__krewcli-bridge__spawn_subtask"
         args += [
             "--mcp-config", str(mcp_config_path),
-            # Lock the tool surface: only the bridge's `delegate` tool is
-            # allowed. Without this, the brain has Bash/Read/Edit/etc.
-            # against its local cwd (the daemon host's filesystem) and
-            # will fall back to local ops instead of routing through the
-            # bundle's e2b sandbox — defeating the contract and producing
-            # completion-fakes (e.g. "task done: found local copy").
-            "--allowed-tools", "mcp__krewcli-bridge__delegate,mcp__krewcli-bridge__hitl.request_access",
-            # Inject the delegate-vs-AskUserQuestion guidance via
-            # --append-system-prompt (TRUSTED source) so Claude's
-            # prompt-injection defenses don't flag it. Putting the
-            # same note into the user prompt or task description
-            # triggers Claude's "instructions from untrusted content"
-            # heuristic and the brain refuses to follow it.
-            "--append-system-prompt", _DELEGATE_SYSTEM_NOTE,
+            "--allowed-tools", allowed,
+            # Inject the guidance via --append-system-prompt (TRUSTED
+            # source) so Claude's prompt-injection defenses don't flag
+            # it. The orch note tells the brain to orchestrate; the
+            # worker note tells it to route work through the sandbox.
+            "--append-system-prompt",
+            _ORCH_SYSTEM_NOTE if orch else _DELEGATE_SYSTEM_NOTE,
         ]
     args += ["-p", prompt]
     return args
@@ -98,12 +105,14 @@ class ClaudeBackend:
         loop = asyncio.get_running_loop()
         result_future: asyncio.Future[BackendResult] = loop.create_future()
 
-        asyncio.create_task(
+        runner = asyncio.create_task(
             _run_claude(prompt, working_dir, env, queue, result_future),
             name="claude-backend",
         )
 
-        return BackendSession(messages=queue, result_future=result_future)
+        return BackendSession(
+            messages=queue, result_future=result_future, runner=runner,
+        )
 
 
 async def _run_claude(
@@ -119,6 +128,7 @@ async def _run_claude(
     # If KREWHUB_TASK_ID is set, write a per-task .mcp_config.json so
     # claude can call the krewcli-bridge `delegate` tool. The execenv
     # surfaces KREWHUB_* vars; we re-use them here.
+    orch = proc_env.get("KREWCLI_ORCH_AGENT") == "1"
     mcp_config_path: str | None = None
     if delegate_wiring_active(proc_env):
         try:
@@ -131,6 +141,7 @@ async def _run_claude(
                 bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
                 cookbook_id=proc_env.get("KREWHUB_COOKBOOK_ID", ""),
                 sandbox_id=proc_env.get("KREWHUB_SANDBOX_ID", ""),
+                orch=orch,
             )
         except OSError as exc:
             logger.warning(
@@ -138,7 +149,9 @@ async def _run_claude(
                 "delegate tool will be unavailable", exc,
             )
 
-    args = build_claude_args(prompt=prompt, mcp_config_path=mcp_config_path)
+    args = build_claude_args(
+        prompt=prompt, mcp_config_path=mcp_config_path, orch=orch,
+    )
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -188,6 +201,12 @@ async def _run_claude(
                 is_error = True
                 error_text = delta.error_text or error_text
 
+    except asyncio.CancelledError:
+        # A persistent caller (orch loop) cancelled the turn / is shutting
+        # down. Kill the whole process group so the `claude` child (spawned
+        # with start_new_session=True) doesn't outlive us as a zombie.
+        _kill_process_group(process)
+        raise
     except asyncio.TimeoutError:
         try:
             process.kill()
@@ -231,6 +250,20 @@ async def _run_claude(
         blocked_reason=None if success else (error_text or summary),
     ))
     await queue.put(None)
+
+
+def _kill_process_group(process) -> None:
+    """Terminate the subprocess and its session group (best-effort)."""
+    import os
+    import signal
+
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
 
 
 # ── Stream message parsing ────────────────────────────────────────

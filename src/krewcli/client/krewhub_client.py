@@ -10,6 +10,12 @@ from krewcli.auth.token_store import load_token
 
 logger = logging.getLogger(__name__)
 
+# v3 single link primitive: "A drives B" (Brief↓ + Report↑). On the wire,
+# pre-migration krewhub still types links as pipe|subagent; the
+# bidirectional drives semantics map to "subagent". krewhub will collapse
+# kind → "drives" (notes 2.2 §krewhub), after which this is a no-op field.
+DRIVES_LINK_KIND = "subagent"
+
 
 class _RefreshingBearerAuth(httpx.Auth):
     """httpx.Auth that re-reads ~/.krewcli/token from disk on 401.
@@ -537,22 +543,24 @@ class KrewHubClient:
         self,
         from_task_id: str,
         *,
-        kind: str = "subagent",
+        kind: str = DRIVES_LINK_KIND,
         to_task_id: str | None = None,
         new_task: dict[str, Any] | None = None,
         payload_map: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Create a data-flow edge from ``from_task_id`` (design §5).
+        """Create a single "drives" link "A drives B" from ``from_task_id``.
 
-        Exactly one of ``to_task_id`` (link an existing task) or
-        ``new_task`` (create the downstream inline, provenance-stamped
-        ``created_by_task = from_task_id``) must be given. ``new_task``
-        is ``{"title": str, "description"?: str, "brief"?: {...}}``.
+        v3 has one link primitive: ``from`` sends Brief↓, ``to`` returns
+        Report↑. Exactly one of ``to_task_id`` (link an existing/running
+        task — runtime adoption) or ``new_task`` (spawn the downstream
+        inline, provenance ``created_by_task = from_task_id``) must be
+        given. ``new_task`` is ``{"title", "description"?, "brief"?}``.
 
-        This is the orch-agent's spawn primitive — POST /tasks/{A}/links
-        with ``new_task`` + ``kind="subagent"`` is the API form of
-        infinite-scroll's ``new-cell``. Returns ``{"link": {...},
-        "to_task": {...}}``.
+        Wire note: until krewhub collapses ``kind`` → "drives" (notes 2.2
+        §krewhub), the bidirectional "drives" semantics map to the
+        existing ``kind="subagent"`` value on the wire (Brief↓ + Report↑ +
+        provenance). When krewhub defaults/ignores ``kind`` this becomes a
+        no-op field. Returns ``{"link": {...}, "to_task": {...}}``.
         """
         body: dict[str, Any] = {"kind": kind}
         if (to_task_id is None) == (new_task is None):
@@ -589,6 +597,22 @@ class KrewHubClient:
         )
         resp.raise_for_status()
         return resp.json().get("links", [])
+
+    async def get_outgoing_links(
+        self,
+        task_id: str,
+        bundle_id: str,
+    ) -> list[dict[str, Any]]:
+        """Active drives links where ``task_id`` is the ``from`` end.
+
+        The v3 routing key: a task with outgoing links is driving them
+        (orchestrator); none ⇒ leaf. Derived from the bundle links so it
+        also reflects human runtime-adoption edges, not just provenance.
+        (krewhub may add ``GET /tasks/{id}/links?direction=out`` later;
+        this filter works against the shipped bundle-links endpoint.)
+        """
+        links = await self.get_bundle_links(bundle_id)
+        return [lk for lk in links if lk.get("from_task_id") == task_id]
 
     async def watch(
         self,

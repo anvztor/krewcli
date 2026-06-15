@@ -16,7 +16,6 @@ import shutil
 
 from krewcli.backend._delegate import (
     DELEGATE_SYSTEM_NOTE as _DELEGATE_SYSTEM_NOTE,
-    ORCH_SYSTEM_NOTE as _ORCH_SYSTEM_NOTE,
     delegate_wiring_active,
     write_claude_mcp_config,
 )
@@ -37,14 +36,15 @@ def build_claude_args(
     *,
     prompt: str,
     mcp_config_path: str | None = None,
-    orch: bool = False,
 ) -> list[str]:
     """Assemble the `claude` CLI argv. Bridge MCP server is wired in
     when `mcp_config_path` is supplied.
 
-    When ``orch`` is set, the tool surface and system note switch to the
-    orchestrator's: ``spawn_subtask`` is unlocked (gap 5) and the brain
-    is told to decompose+delegate, never to do the work itself.
+    v3: every task's brain gets the SAME unified tool surface — delegate
+    (route work through the bundle's e2b sandbox) + hitl + spawn_subtask
+    (decompose into child + drives link, only when necessary). There is
+    no orchestrator-vs-worker split; behavior is derived from whether the
+    task ends up with outgoing links (see daemon.loop).
     """
     args: list[str] = [
         "claude",
@@ -57,22 +57,21 @@ def build_claude_args(
         "--disallowedTools", "AskUserQuestion",
     ]
     if mcp_config_path:
-        # Lock the tool surface. Workers get delegate+hitl (route all
-        # work through the bundle's e2b sandbox); the orch-agent ALSO
-        # gets spawn_subtask but no sandbox — it only decomposes and
-        # delegates, never edits files on the daemon host.
-        allowed = "mcp__krewcli-bridge__delegate,mcp__krewcli-bridge__hitl.request_access"
-        if orch:
-            allowed += ",mcp__krewcli-bridge__spawn_subtask"
+        # Unified tool surface: no local Bash/Edit — all work routes
+        # through the sandbox via delegate; decomposition via spawn_subtask
+        # (capped per turn by KREWCLI_ORCH_SPAWN_BUDGET).
+        allowed = (
+            "mcp__krewcli-bridge__delegate,"
+            "mcp__krewcli-bridge__hitl.request_access,"
+            "mcp__krewcli-bridge__spawn_subtask"
+        )
         args += [
             "--mcp-config", str(mcp_config_path),
             "--allowed-tools", allowed,
-            # Inject the guidance via --append-system-prompt (TRUSTED
-            # source) so Claude's prompt-injection defenses don't flag
-            # it. The orch note tells the brain to orchestrate; the
-            # worker note tells it to route work through the sandbox.
-            "--append-system-prompt",
-            _ORCH_SYSTEM_NOTE if orch else _DELEGATE_SYSTEM_NOTE,
+            # Inject guidance via --append-system-prompt (TRUSTED source)
+            # so Claude's prompt-injection defenses don't flag it. One
+            # unified note covers sandbox work + decompose + untrusted-link.
+            "--append-system-prompt", _DELEGATE_SYSTEM_NOTE,
         ]
     args += ["-p", prompt]
     return args
@@ -126,9 +125,8 @@ async def _run_claude(
     proc_env = {**os.environ, **(extra_env or {})}
 
     # If KREWHUB_TASK_ID is set, write a per-task .mcp_config.json so
-    # claude can call the krewcli-bridge `delegate` tool. The execenv
-    # surfaces KREWHUB_* vars; we re-use them here.
-    orch = proc_env.get("KREWCLI_ORCH_AGENT") == "1"
+    # claude can call the krewcli-bridge `delegate`/`spawn_subtask` tools.
+    # The execenv surfaces KREWHUB_* vars; we re-use them here.
     mcp_config_path: str | None = None
     if delegate_wiring_active(proc_env):
         try:
@@ -141,7 +139,6 @@ async def _run_claude(
                 bundle_id=proc_env.get("KREWHUB_BUNDLE_ID", ""),
                 cookbook_id=proc_env.get("KREWHUB_COOKBOOK_ID", ""),
                 sandbox_id=proc_env.get("KREWHUB_SANDBOX_ID", ""),
-                orch=orch,
             )
         except OSError as exc:
             logger.warning(
@@ -149,9 +146,7 @@ async def _run_claude(
                 "delegate tool will be unavailable", exc,
             )
 
-    args = build_claude_args(
-        prompt=prompt, mcp_config_path=mcp_config_path, orch=orch,
-    )
+    args = build_claude_args(prompt=prompt, mcp_config_path=mcp_config_path)
 
     try:
         process = await asyncio.create_subprocess_exec(

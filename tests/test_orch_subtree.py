@@ -62,17 +62,19 @@ def test_revoked_links_excluded():
     assert view.children == ()
 
 
-def test_pipe_link_target_surfaced_but_not_extended():
-    # A pipe edge from A to B surfaces B as depth-1 (data-flow visibility)
-    # but B's own subagent children are NOT pulled in (pipe doesn't own).
+def test_every_drives_edge_extends_the_subtree():
+    # v3: a single "drives" link primitive — there is no pipe-vs-subagent
+    # distinction. Every out-edge extends the subtree, so a grandchild
+    # reached through any chain of drives links is owned.
     tasks = {"A": _task("A"), "B": _task("B"), "C": _task("C")}
     links = [
-        _link("l1", "A", "B", kind="pipe"),
-        _link("l2", "B", "C", kind="subagent", created_by="B"),
+        _link("l1", "A", "B"),
+        _link("l2", "B", "C", created_by="B"),
     ]
     view = build_subtree("A", "BND", tasks, links)
     ids = {c.task_id for c in view.children}
-    assert ids == {"B"}  # C not owned through a pipe edge
+    assert ids == {"B", "C"}
+    assert all(c.kind == "drives" for c in view.children)
 
 
 def test_terminal_signature_only_terminal_children():

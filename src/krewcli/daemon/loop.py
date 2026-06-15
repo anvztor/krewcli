@@ -121,6 +121,13 @@ class DaemonLoop:
         self._heartbeats: list[HeartbeatLoop] = []
         self._runtime_heartbeats: list[RuntimeHeartbeat] = []
         self._running_tasks: set[str] = set()
+        # Orchestrations (supervisory handlers) run long but mostly wait;
+        # they are tracked here and NOT charged a worker-concurrency slot,
+        # so one daemon can orchestrate a task AND claim/execute the
+        # children it spawns (otherwise a max_concurrent=1 daemon would
+        # deadlock: the orchestrator holds the only slot, its children
+        # never get claimed).
+        self._orchestrations: set[str] = set()
         self._task_jobs: set[asyncio.Task] = set()
         self._planning_bundle: str | None = None
         self._watcher = None
@@ -383,9 +390,13 @@ class DaemonLoop:
     # Cookrew task polling fallback
     # ------------------------------------------------------------------
 
+    def _worker_load(self) -> int:
+        """Count of tasks occupying a worker slot (orchestrations excluded)."""
+        return len(self._running_tasks - self._orchestrations)
+
     async def _poll_claimable_tasks(self) -> None:
         """Claim and execute open tasks created directly through cookrew-beta."""
-        if len(self._running_tasks) >= self._max_concurrent:
+        if self._worker_load() >= self._max_concurrent:
             return
 
         try:
@@ -404,7 +415,7 @@ class DaemonLoop:
         loop_now = asyncio.get_event_loop().time()
 
         for task in tasks:
-            if len(self._running_tasks) >= self._max_concurrent:
+            if self._worker_load() >= self._max_concurrent:
                 return
 
             task_id = task.get("id")
@@ -508,6 +519,43 @@ class DaemonLoop:
         finally:
             self._running_tasks.discard(task_id)
 
+    def _krewhub_creds(self) -> tuple[str, str]:
+        """(krewhub_url, session_token) for the bridge MCP server's callbacks."""
+        from krewcli.auth.token_store import load_token
+        inner = getattr(self._client, "_client", None)
+        base_url = getattr(inner, "base_url", "") if inner is not None else ""
+        krewhub_url = str(base_url).rstrip("/") if base_url else ""
+        return krewhub_url, (load_token() or "")
+
+    async def _task_depth(self, task_id: str, bundle_id: str) -> int:
+        """Depth of ``task_id`` in the bundle's drives tree (root = 0).
+
+        Walks incoming drives links upward; used to enforce the max-depth
+        blast-radius cap on recursion."""
+        try:
+            links = await self._client.get_bundle_links(bundle_id)
+        except Exception:
+            return 0
+        incoming: dict[str, set[str]] = {}
+        for lk in links:
+            if lk.get("revoked_at"):
+                continue
+            to_id, from_id = lk.get("to_task_id"), lk.get("from_task_id")
+            if to_id and from_id:
+                incoming.setdefault(to_id, set()).add(from_id)
+        depth, frontier, seen = 0, {task_id}, set()
+        while frontier and depth < 16:
+            parents: set[str] = set()
+            for t in frontier:
+                parents |= incoming.get(t, set())
+            parents -= seen
+            if not parents:
+                break
+            depth += 1
+            seen |= frontier
+            frontier = parents
+        return depth
+
     async def _execute_task(
         self,
         *,
@@ -519,44 +567,134 @@ class DaemonLoop:
         task_detail: dict,
         metadata: dict | None = None,
     ):
-        backend = self._backends[backend_name]
+        """v3 unified loop: one brain turn, then route by LINK TOPOLOGY.
+
+        Every claimed task runs ONE brain turn through the Harness with the
+        unified tool surface (delegate(sandbox) + spawn_subtask). Then:
+          • no outgoing drives links ⇒ the brain did the work itself → LEAF,
+            finalize the task;
+          • outgoing drives links exist (it decomposed, or a human adopted
+            a child) ⇒ ORCHESTRATOR → drive the subtree to completion
+            (consume Reports↑ as DATA, spawn/reclaim/finalize).
+        No mode enum; behavior is derived from the links the turn produced.
+        """
+        from krewcli.daemon.orch_config import OrchConfig
+        from krewcli.daemon.orch_drive import OrchDrive
+
         metadata = metadata or {}
+        cfg = OrchConfig.from_env()
+        depth = await self._task_depth(task_id, bundle_id)
+
+        # First brain turn — full pipeline, but DON'T auto-finalize: the
+        # turn may have spawned children (making this an orchestrator).
         async with self._semaphore:
-            session = Session(self._client, task_id, agent_id)
-            execenv = ExecutionEnvironment(
-                base_dir=self._working_dir,
-                task_id=task_id,
-                bundle_id=bundle_id,
-                repo_url=metadata.get("repo_url", self._repo_url),
-                branch=metadata.get("branch", self._branch),
-                sandbox_id=task_detail.get("sandbox_id"),
+            result = await self._harness_turn(
+                backend_name=backend_name, agent_id=agent_id, task_id=task_id,
+                bundle_id=bundle_id, prompt=prompt, task_detail=task_detail,
+                metadata=metadata, spawn_budget=cfg.spawn_budget(0, depth),
             )
 
-            harness = Harness(self._client)
-            # Surface krewhub URL + JWT to the agent's env so the
-            # krewcli-bridge MCP server can call back when the brain
-            # invokes `delegate(...)`. Without these, claude.py's MCP
-            # wiring guard skips and the brain has no `delegate` tool —
-            # which makes it reach for AskUserQuestion (denied) and
-            # then hallucinate operator answers.
-            from krewcli.auth.token_store import load_token
-            inner = getattr(self._client, "_client", None)
-            base_url = getattr(inner, "base_url", "") if inner is not None else ""
-            krewhub_url = str(base_url).rstrip("/") if base_url else ""
-            session_token = load_token() or ""
-            return await harness.execute(
-                backend=backend,
-                session=session,
-                execenv=execenv,
-                prompt=prompt,
-                task_id=task_id,
-                task_title=task_detail.get("title", ""),
-                task_description=task_detail.get("description", ""),
-                cookbook_id=metadata.get("cookbook_id", self._cookbook_id),
+        try:
+            out_links = await self._client.get_outgoing_links(task_id, bundle_id)
+        except Exception:
+            out_links = []
+
+        if not out_links:
+            # LEAF — the brain finished the work; finalize (Harness ran with
+            # finalize=False, so a successful run is still `working`).
+            click.echo(f"  → leaf · task {task_id[:12]} via {backend_name}")
+            if result.success and not result.cancelled:
+                try:
+                    await self._client.update_task_status(task_id, "done")
+                except Exception:
+                    logger.warning("loop: failed to finalize leaf %s", task_id)
+            return result
+
+        # ORCHESTRATOR — drive the subtree without holding a worker slot, so
+        # this daemon can also claim/execute the children it spawned.
+        click.echo(
+            f"  → orchestrator · task {task_id[:12]} drives "
+            f"{len(out_links)} link(s)"
+        )
+        self._orchestrations.add(task_id)
+        try:
+            krewhub_url, session_token = self._krewhub_creds()
+            drive = OrchDrive(
+                client=self._client,
+                backend=self._backends[backend_name],
+                task=task_detail,
+                agent_id=agent_id,
+                working_dir=self._working_dir,
                 krewhub_url=krewhub_url,
                 session_token=session_token,
-                bundle_id=bundle_id,
+                cookbook_id=metadata.get("cookbook_id", self._cookbook_id),
+                depth=depth,
+                poll_interval=self._poll_interval,
+                config=cfg,
             )
+            await drive.run()
+            from krewcli.daemon.harness import HarnessResult
+            return HarnessResult(success=True, summary=drive.summary)
+        finally:
+            self._orchestrations.discard(task_id)
+
+    async def _harness_turn(
+        self,
+        *,
+        backend_name: str,
+        agent_id: str,
+        task_id: str,
+        bundle_id: str,
+        prompt: str,
+        task_detail: dict,
+        metadata: dict,
+        spawn_budget: int,
+    ):
+        """Run one brain turn through the full Harness pipeline (no auto-
+        finalize). Surfaces the per-turn spawn budget so the bridge caps
+        spawn_subtask."""
+        from krewcli.daemon.orch_prompt import render_worker_brief
+
+        krewhub_url, session_token = self._krewhub_creds()
+
+        # Fold the task's Brief↓ (when present — e.g. a spawned child) into
+        # the prompt as a secret-redacted DATA envelope (v3 injection
+        # defense is symmetric on the link).
+        brief = task_detail.get("brief") or task_detail.get("brief_json")
+        if isinstance(brief, dict) and brief.get("goal"):
+            brief_block = render_worker_brief(
+                brief, (session_token,) if session_token else (),
+            )
+            if brief_block:
+                prompt = f"{brief_block}\n\n{prompt}" if prompt else brief_block
+
+        session = Session(self._client, task_id, agent_id)
+        execenv = ExecutionEnvironment(
+            base_dir=self._working_dir,
+            task_id=task_id,
+            bundle_id=bundle_id,
+            repo_url=metadata.get("repo_url", self._repo_url),
+            branch=metadata.get("branch", self._branch),
+            sandbox_id=task_detail.get("sandbox_id"),
+        )
+        # The spawn budget rides the spawn env so the bridge (a subprocess
+        # of the brain) can enforce it per turn.
+        os.environ["KREWCLI_ORCH_SPAWN_BUDGET"] = str(spawn_budget)
+        harness = Harness(self._client)
+        return await harness.execute(
+            backend=self._backends[backend_name],
+            session=session,
+            execenv=execenv,
+            prompt=prompt,
+            task_id=task_id,
+            task_title=task_detail.get("title", ""),
+            task_description=task_detail.get("description", ""),
+            cookbook_id=metadata.get("cookbook_id", self._cookbook_id),
+            krewhub_url=krewhub_url,
+            session_token=session_token,
+            bundle_id=bundle_id,
+            finalize=False,
+        )
 
     # ------------------------------------------------------------------
     # Registration

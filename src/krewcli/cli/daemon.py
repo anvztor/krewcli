@@ -41,27 +41,6 @@ def daemon() -> None:
 @click.option("--repo-url", default="", help="Repository URL for code ref tracking")
 @click.option("--branch", default="", help="Branch name for code ref tracking")
 @click.option(
-    "--orch",
-    is_flag=True,
-    default=False,
-    help=(
-        "Run as the Row-0 orchestrator brain bound to --task instead of a "
-        "worker daemon. Requires KREWCLI_ORCH_AGENT=1 (per-runtime opt-in)."
-    ),
-)
-@click.option(
-    "--task",
-    "orch_task",
-    default=None,
-    help="Root task id the orch-agent orchestrates (required with --orch).",
-)
-@click.option(
-    "--max-turns",
-    default=None,
-    type=int,
-    help="Stop the orch-agent after N turns (default: run until A is cancelled).",
-)
-@click.option(
     "--background/--foreground",
     "background",
     default=False,
@@ -82,11 +61,14 @@ def start(
     repo_url: str,
     branch: str,
     background: bool,
-    orch: bool,
-    orch_task: str | None,
-    max_turns: int | None,
 ) -> None:
     """Start the daemon. Polls krewhub for tasks and executes them.
+
+    \b
+    One unified runtime: each claimed task is routed by its MODE
+    (ASSIGN → worker-execute, ORCH → orchestrate, ASK → clarify). The
+    same paired agent is a worker or an orchestrator depending on the
+    task it picks up — no separate daemon, no flag.
 
     \b
     When --cookbook is omitted, an interactive prompt guides you
@@ -97,7 +79,6 @@ def start(
       krewcli daemon start                           # fully interactive
       krewcli daemon start --cookbook CB              # non-interactive
       krewcli daemon start --cookbook CB --agents echo  # test mode
-      KREWCLI_ORCH_AGENT=1 krewcli daemon start --orch --task A  # brain
     """
     import os
 
@@ -106,40 +87,6 @@ def start(
 
     settings = ctx.obj["settings"]
     resolved_workdir = os.path.abspath(workdir)
-
-    # ── Orch-agent (Row-0 brain) — gap 5 / C1. A different runtime than
-    #    the worker daemon: persistent LLM session bound to one task. ──
-    if orch:
-        if os.environ.get("KREWCLI_ORCH_AGENT") not in ("1", "true", "True"):
-            raise click.ClickException(
-                "--orch requires KREWCLI_ORCH_AGENT=1 (per-runtime opt-in). "
-                "Export it and retry: KREWCLI_ORCH_AGENT=1 krewcli daemon "
-                "start --orch --task <task_id>"
-            )
-        if not orch_task:
-            raise click.ClickException("--orch requires --task <root task id>")
-
-        requested = [a.strip() for a in (agents or "claude").split(",") if a.strip()]
-        backends = resolve_backends(requested)
-        if not backends:
-            raise click.ClickException("No backend resolved for --orch.")
-        backend = next(iter(backends.values()))
-
-        click.echo("\nkrewcli orch-agent starting")
-        click.echo(f"  KrewHub:   {settings.krewhub_url}")
-        click.echo(f"  Root task: {orch_task}")
-        click.echo(f"  Backend:   {backend.name}")
-        click.echo(f"  Work dir:  {resolved_workdir}")
-
-        asyncio.run(_run_orch(
-            settings=settings,
-            backend=backend,
-            task_id=orch_task,
-            working_dir=resolved_workdir,
-            poll_interval=poll_interval,
-            max_turns=max_turns,
-        ))
-        return
 
     resolved_cookbook = cookbook or settings.default_cookbook_id
     need_interactive = not resolved_cookbook
@@ -309,42 +256,6 @@ async def _run_daemon(
         await loop.run()
     except KeyboardInterrupt:
         click.echo("\nDaemon stopped.")
-    finally:
-        await client.close()
-
-
-async def _run_orch(
-    settings,
-    backend,
-    task_id: str,
-    working_dir: str,
-    poll_interval: float,
-    max_turns: int | None,
-) -> None:
-    """Create a fresh client and run the orch-agent loop."""
-    from krewcli.auth.token_store import load_token
-    from krewcli.daemon.orch_loop import OrchLoop
-
-    jwt_token = load_token()
-    client = KrewHubClient(
-        settings.krewhub_url,
-        settings.api_key,
-        jwt_token=jwt_token,
-        verify_ssl=settings.verify_ssl,
-    )
-    loop = OrchLoop(
-        client=client,
-        backend=backend,
-        task_id=task_id,
-        working_dir=working_dir,
-        poll_interval=poll_interval,
-        heartbeat_interval=settings.heartbeat_interval,
-        max_turns=max_turns,
-    )
-    try:
-        await loop.run()
-    except KeyboardInterrupt:
-        click.echo("\nOrch-agent stopped.")
     finally:
         await client.close()
 

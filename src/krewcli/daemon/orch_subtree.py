@@ -95,13 +95,14 @@ def build_subtree(
     tasks_by_id: dict[str, dict],
     links: list[dict],
 ) -> SubtreeView:
-    """Walk subagent links from the root to assemble the provenance subtree.
+    """Walk drives links (out-edges) from the root to assemble the subtree.
 
-    A task is in A's subtree if it is reachable from A by following
-    active subagent links whose ``created_by_task`` is already in the
-    subtree (provenance edges — exactly the links ``spawn_subtask``
-    draws). Pipe links into a subtree member are surfaced too so the
-    brain sees data-flow edges, but they don't extend ownership.
+    v3: a single "drives" link primitive — every active outgoing link
+    "A drives B" makes B a child of A, regardless of how it was created
+    (agent-spawned OR human runtime-adoption). Behavior is derived from
+    link topology, not provenance: ``created_by_task`` is metadata, not a
+    gate (an adopted child has ``created_by_task != A`` yet is still A's
+    child). The walk is bounded + cycle-safe via the ``seen`` set.
     """
     # Active (non-revoked) links keyed by from_task_id.
     out_links: dict[str, list[dict]] = {}
@@ -115,23 +116,20 @@ def build_subtree(
 
     children: list[ChildState] = []
     seen: set[str] = {root_task_id}
-    # BFS over provenance edges. (task_id, depth)
+    # BFS over drives out-edges. (task_id, depth)
     frontier: list[tuple[str, int]] = [(root_task_id, 0)]
     while frontier:
         parent_id, depth = frontier.pop(0)
         for lk in out_links.get(parent_id, []):
-            kind = lk.get("kind")
             to_id = lk.get("to_task_id")
             if not to_id:
                 continue
-            # Only subagent links with provenance extend the owned subtree.
-            extends = kind == "subagent" and lk.get("created_by_task") == parent_id
             task = tasks_by_id.get(to_id, {})
             child = ChildState(
                 task_id=to_id,
                 title=task.get("title", "") or "",
                 status=task.get("status", "unknown") or "unknown",
-                kind=kind or "subagent",
+                kind="drives",
                 link_id=lk.get("id"),
                 parent_task_id=parent_id,
                 depth=depth + 1,
@@ -139,8 +137,9 @@ def build_subtree(
             if to_id not in seen:
                 children.append(child)
                 seen.add(to_id)
-                if extends:
-                    frontier.append((to_id, depth + 1))
+                # Every drives edge extends the subtree (recursion is
+                # bounded by depth/fan-out caps in the engine, not here).
+                frontier.append((to_id, depth + 1))
     return SubtreeView(
         root_task_id=root_task_id,
         bundle_id=bundle_id,

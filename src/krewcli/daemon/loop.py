@@ -320,7 +320,8 @@ class DaemonLoop:
                 metadata=metadata,
             )
             status = "done" if result.success else "blocked"
-            click.echo(f"  ✓ Task {task_id[:12]} {status}: {result.summary[:80]}")
+            glyph = "✓" if result.success else "✗"
+            click.echo(f"  {glyph} Task {task_id[:12]} {status}: {result.summary[:80]}")
             return {"text": result.summary[:4096]}
 
         except Exception:
@@ -501,8 +502,9 @@ class DaemonLoop:
                 metadata={"cookbook_id": task.get("cookbook_id", self._cookbook_id)},
             )
             status = "done" if result.success else "blocked"
+            glyph = "✓" if result.success else "✗"
             click.echo(
-                f"  ✓ Cookrew task {task_id[:12]} {status}: "
+                f"  {glyph} Cookrew task {task_id[:12]} {status}: "
                 f"{result.summary[:80]}",
             )
         except asyncio.CancelledError:

@@ -150,40 +150,37 @@ async def test_spawn_subtask_surfaces_http_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tools_list_exposes_spawn_only_in_orch_mode(monkeypatch):
-    """Workers never see spawn_subtask; only KREWCLI_ORCH_AGENT=1 unlocks it."""
+async def test_tools_list_always_exposes_spawn(monkeypatch):
+    """v3: every task's brain may decompose, so spawn_subtask is always
+    advertised (no orch-mode gate)."""
     from krewcli.mcp_servers import bridge
 
     monkeypatch.delenv("KREWCLI_ORCH_AGENT", raising=False)
     resp = await bridge.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in resp["result"]["tools"]}
-    assert "spawn_subtask" not in names
-    assert "delegate" in names
-
-    monkeypatch.setenv("KREWCLI_ORCH_AGENT", "1")
-    resp = await bridge.handle_message({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    names = {t["name"] for t in resp["result"]["tools"]}
-    assert "spawn_subtask" in names
+    assert {"delegate", "hitl.request_access", "spawn_subtask"} <= names
 
 
 @pytest.mark.asyncio
-async def test_tools_call_spawn_subtask_blocked_for_workers(monkeypatch):
-    """Defense-in-depth: a worker bridge (no orch flag) refuses the call
-    even if the tool name is guessed."""
+async def test_spawn_budget_caps_spawns_per_turn(monkeypatch):
+    """Blast-radius cap: spawn_subtask refuses once the per-turn budget is
+    spent (the cap that bounds an injection/loop-driven runaway)."""
     from krewcli.mcp_servers import bridge
 
     monkeypatch.setenv("KREWHUB_URL", "http://krewhub:8420")
     monkeypatch.setenv("KREWHUB_TASK_ID", "task_A")
-    monkeypatch.delenv("KREWCLI_ORCH_AGENT", raising=False)
+    monkeypatch.setenv("KREWCLI_ORCH_SPAWN_BUDGET", "1")
+    monkeypatch.setattr(bridge, "_spawn_count", 0, raising=False)
 
-    resp = await bridge.handle_message({
-        "jsonrpc": "2.0", "id": 9, "method": "tools/call",
-        "params": {"name": "spawn_subtask",
-                   "arguments": {"title": "x",
-                                 "brief": {"goal": "g", "deliverable": "d"}}},
-    })
-    assert "error" in resp
-    assert "orch-agent" in resp["error"]["message"]
+    capture: list[dict] = []
+    _install_fake_post(monkeypatch, bridge, capture)
+
+    first = await bridge.spawn_subtask({"title": "B", "brief": {"goal": "g", "deliverable": "d"}})
+    second = await bridge.spawn_subtask({"title": "C", "brief": {"goal": "g", "deliverable": "d"}})
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert "spawn_budget_exhausted" in second["error"]
+    assert len(capture) == 1  # only the first reached krewhub
 
 
 @pytest.mark.asyncio

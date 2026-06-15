@@ -80,8 +80,9 @@ def test_later_turn_prompt_surfaces_new_reports():
         root_task=root, subtree=subtree, new_reports=reports,
         prior_turns=[("ORCH", "spawned B")], first_turn=False,
     )
-    assert "Child reports (NEW since your last turn)" in prompt
-    assert "from task B" in prompt
+    # v3: reports are framed as UNTRUSTED DATA, not a bare turn.
+    assert "UNTRUSTED DATA" in prompt
+    assert "BEGIN SUBAGENT_REPORT" in prompt
     assert "pr/9" in prompt
     assert "ORCH: spawned B" in prompt
     # Subtree table shows B as done.

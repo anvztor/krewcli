@@ -72,8 +72,17 @@ class Harness:
         bundle_id: str = "",
         krewhub_url: str = "",
         session_token: str = "",
+        finalize: bool = True,
     ) -> HarnessResult:
-        """Execute a task through the full managed agent lifecycle."""
+        """Execute a task through the full managed agent lifecycle.
+
+        ``finalize`` (v3): when False, a *successful* run does NOT flip the
+        task to ``done`` — the caller decides, because the brain may have
+        spawned children (becoming an orchestrator) and must stay
+        ``working`` to drive them. Cancellation, HITL-pending, and failure
+        still set their terminal status (those are terminal regardless of
+        orchestration).
+        """
         # 1. Setup execution environment
         workdir = await execenv.setup(
             task_title=task_title,
@@ -264,10 +273,15 @@ class Harness:
                     task_id, inv_ref,
                 )
         elif result.success:
-            try:
-                await self._client.update_task_status(task_id, "done")
-            except Exception:
-                logger.warning("harness: failed to set task %s to done", task_id)
+            # v3: a successful run only auto-completes when finalize=True.
+            # The unified loop passes finalize=False, then checks the
+            # task's outgoing links: spawned children ⇒ stay working and
+            # orchestrate; no children ⇒ the loop marks it done.
+            if finalize:
+                try:
+                    await self._client.update_task_status(task_id, "done")
+                except Exception:
+                    logger.warning("harness: failed to set task %s to done", task_id)
         else:
             try:
                 await self._client.update_task_status(

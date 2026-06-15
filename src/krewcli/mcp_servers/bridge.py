@@ -90,15 +90,14 @@ HITL_TOOL_DEF: dict = {
 SPAWN_SUBTASK_TOOL_DEF: dict = {
     "name": "spawn_subtask",
     "description": (
-        "Decompose your goal: create a child subtask under the task you "
-        "orchestrate and link it as your sub-agent. Use this when the work "
-        "splits into a unit a worker should own end-to-end. The child is "
-        "created with provenance (created_by_task = your task), a subagent "
-        "link is drawn (purple arrow on the board), and the worker's Report "
-        "flows back onto YOUR tape when it completes — you'll see it as a "
-        "'Child report' on your next turn. This is your ONLY way to spawn "
-        "work; do not try to do a subtask's work yourself. Returns the new "
-        "task_id and link_id."
+        "Decompose your goal: create a child task and draw a 'drives' link "
+        "from your task to it (A drives B). Use this ONLY when the work is "
+        "too big for one worker and splits into a unit best owned end-to-end "
+        "by a sub-agent — otherwise just do the work yourself via the "
+        "sandbox. The child is created with provenance (created_by_task = "
+        "your task) and you send it a Brief↓; its Report↑ flows back onto "
+        "YOUR tape when it completes — you'll see it as a 'Child report' on "
+        "a later turn. Spawns are capped per turn. Returns task_id + link_id."
     ),
     "inputSchema": {
         "type": "object",
@@ -504,6 +503,20 @@ async def delegate(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Per-process spawn counter. Each orch turn spawns a fresh `claude` (and
+# thus a fresh bridge process), so this resets per turn — enforcing the
+# engine's per-turn spawn budget as a blast-radius cap against an
+# injection- or loop-driven runaway.
+_spawn_count = 0
+
+
+def _spawn_budget() -> int:
+    try:
+        return int(os.environ.get("KREWCLI_ORCH_SPAWN_BUDGET", "8"))
+    except ValueError:
+        return 8
+
+
 async def spawn_subtask(args: dict) -> dict:
     """Create a child subtask under the orchestrated task and subagent-link
     it. POSTs ``new_task`` to ``/api/v1/tasks/{KREWHUB_TASK_ID}/links`` with
@@ -511,9 +524,11 @@ async def spawn_subtask(args: dict) -> dict:
 
     The parent task id is read from ``KREWHUB_TASK_ID`` (set at spawn time
     by the orch loop's exec env) and CANNOT be supplied by the brain, so a
-    sub-agent cannot re-parent a task it doesn't own. Returns a small
+    sub-agent cannot re-parent a task it doesn't own. Spawns are capped per
+    turn via ``KREWCLI_ORCH_SPAWN_BUDGET``. Returns a small
     ``{ok, task_id, link_id, title}`` envelope the model can act on.
     """
+    global _spawn_count
     base = _krewhub_url()
     if not base:
         return {"ok": False, "error": "bridge_misconfig: KREWHUB_URL unset"}
@@ -521,6 +536,17 @@ async def spawn_subtask(args: dict) -> dict:
     parent_task_id = os.environ.get("KREWHUB_TASK_ID", "").strip()
     if not parent_task_id:
         return {"ok": False, "error": "no_parent_task: KREWHUB_TASK_ID unset"}
+
+    budget = _spawn_budget()
+    if _spawn_count >= budget:
+        return {
+            "ok": False,
+            "error": (
+                f"spawn_budget_exhausted: child cap reached "
+                f"({budget} this turn). Triage existing children or "
+                f"escalate to the human instead of spawning more."
+            ),
+        }
 
     title = (args.get("title") or "").strip()
     if not title:
@@ -550,6 +576,7 @@ async def spawn_subtask(args: dict) -> dict:
         payload = resp.json()
         link = payload.get("link") or {}
         to_task = payload.get("to_task") or {}
+        _spawn_count += 1
         return {
             "ok": True,
             "task_id": to_task.get("id") or link.get("to_task_id"),
@@ -588,14 +615,11 @@ async def handle_message(msg: dict) -> dict | None:
                 "serverInfo": {"name": "krewcli-bridge", "version": "0.1.0"},
             }
         elif method == "tools/list":
-            tools = [DELEGATE_TOOL_DEF, HITL_TOOL_DEF]
-            # spawn_subtask is only meaningful for an orch-agent (the
-            # brain that owns a task and decomposes it). Advertise it
-            # only when the loop set KREWCLI_ORCH_AGENT in the bridge
-            # env — workers never see it, so a worker cannot spawn.
-            if os.environ.get("KREWCLI_ORCH_AGENT") == "1":
-                tools.append(SPAWN_SUBTASK_TOOL_DEF)
-            result = {"tools": tools}
+            # v3: every task's brain may decompose (spawn a child + a
+            # "drives" link), so spawn_subtask is always available. The
+            # per-turn KREWCLI_ORCH_SPAWN_BUDGET caps the blast radius;
+            # "decompose only when necessary" lives in the system note.
+            result = {"tools": [DELEGATE_TOOL_DEF, HITL_TOOL_DEF, SPAWN_SUBTASK_TOOL_DEF]}
         elif method == "tools/call":
             params = msg.get("params") or {}
             name = params.get("name")
@@ -621,16 +645,6 @@ async def handle_message(msg: dict) -> dict | None:
                     "isError": hitl_result.get("status") not in ("granted", "denied", "timeout"),
                 }
             elif name == "spawn_subtask":
-                # Defense in depth: even if a worker bridge somehow received
-                # this call, it only executes for an orch-agent. tools/list
-                # already hides it from workers; this guards tools/call too.
-                if os.environ.get("KREWCLI_ORCH_AGENT") != "1":
-                    if is_notification:
-                        return None
-                    return _error_response(
-                        msg_id, -32602,
-                        "spawn_subtask is only available to an orch-agent",
-                    )
                 spawn_result = await spawn_subtask(args)
                 result = {
                     "content": [

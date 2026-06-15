@@ -108,7 +108,15 @@ async def _run_codex(
                 "%s — delegate tool will be unavailable", exc,
             )
 
-    args = ["codex", "exec", "--skip-git-repo-check", "--full-auto", final_prompt]
+    # `--full-auto` was removed in codex-cli 0.136.0. In non-interactive
+    # `exec` mode codex never prompts for approvals, so the faithful
+    # replacement is just the sandbox policy: workspace-write lets the
+    # agent read/write within the working dir (the old --full-auto
+    # default) while still sandboxing the rest of the system.
+    args = [
+        "codex", "exec", "--skip-git-repo-check",
+        "--sandbox", "workspace-write", final_prompt,
+    ]
 
     await queue.put(BackendMessage(
         kind="session_start",

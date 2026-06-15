@@ -230,3 +230,84 @@ class TestDaemonLoopCookrewPolling:
         await loop._poll_claimable_tasks()
 
         assert client.claims == []
+
+
+class TestTasklessInvocation:
+    """A2A message/send invocations without metadata.task_id must be RUN
+    (one-shot, task-less) — not silently dropped. Regression for the
+    'no task_id in metadata, skipping' eval bug, where the A2A hub's
+    minted envelope id (task_<uuid>) is not a krew task id and some
+    dispatch paths omit metadata.task_id."""
+
+    def _loop(self, tmp_path):
+        from krewcli.backend.echo import EchoBackend
+        from krewcli.daemon.loop import DaemonLoop
+
+        loop = DaemonLoop(
+            client=_FakeClient(),
+            backends={"echo": EchoBackend()},
+            cookbook_id="cb_1",
+            working_dir=str(tmp_path),
+            max_concurrent=1,
+        )
+        loop._agent_ids = {"echo": "echo@krew"}
+        return loop
+
+    @pytest.mark.asyncio
+    async def test_no_task_id_runs_prompt_instead_of_skipping(self, tmp_path):
+        loop = self._loop(tmp_path)
+        payload = {
+            "id": "task_1213ade4530c",  # gateway envelope id, NOT a krew task
+            "method": "message/send",
+            "agent_name": "echo",
+            "params": {"message": {
+                "metadata": {"bundle_id": "bun_1"},  # NO task_id
+                "parts": [{"kind": "text", "text": "summarize the repo"}],
+            }},
+        }
+        result = await loop._handle_invocation(payload)
+        # Not the old drop sentinel; the echo backend actually ran.
+        assert result is not None
+        assert result["text"] != "no task_id in metadata"
+        assert "summarize the repo" in result["text"]
+
+    @pytest.mark.asyncio
+    async def test_no_task_id_empty_prompt_skips_gracefully(self, tmp_path):
+        loop = self._loop(tmp_path)
+        payload = {
+            "id": "task_deadbeef",
+            "method": "message/send",
+            "agent_name": "echo",
+            "params": {"message": {"metadata": {}, "parts": []}},
+        }
+        result = await loop._handle_invocation(payload)
+        assert result == {"text": "no task_id and no prompt in invocation"}
+
+    @pytest.mark.asyncio
+    async def test_task_bound_invocation_still_uses_task_path(self, tmp_path, monkeypatch):
+        """An invocation WITH metadata.task_id still flows through the
+        task-execution path (not the task-less branch)."""
+        loop = self._loop(tmp_path)
+
+        seen = {}
+
+        async def fake_execute(self2, **kwargs):
+            seen.update(kwargs)
+            return HarnessResult(success=True, summary="task ran")
+
+        monkeypatch.setattr("krewcli.daemon.loop.Harness.execute", fake_execute)
+        loop._client.get_task = AsyncMock(return_value={"id": "task_real", "title": "T"})
+        loop._client.get_task_events = AsyncMock(return_value=[])
+
+        payload = {
+            "id": "task_envelope",
+            "method": "message/send",
+            "agent_name": "echo",
+            "params": {"message": {
+                "metadata": {"task_id": "task_real", "bundle_id": "bun_1"},
+                "parts": [{"kind": "text", "text": "do it"}],
+            }},
+        }
+        result = await loop._handle_invocation(payload)
+        assert seen.get("task_id") == "task_real"  # task path taken
+        assert result["text"] == "task ran"

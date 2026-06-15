@@ -262,8 +262,16 @@ class DaemonLoop:
         )
 
         if not task_id:
-            logger.warning("invocation: no task_id in metadata, skipping")
-            return {"text": "no task_id in metadata"}
+            # The A2A hub mints its OWN envelope id (`task_<uuid>`, see
+            # krewhub a2a_gateway) which is NOT a krew task id; task-less /
+            # brain-to-brain `message/send` dispatches carry no
+            # `metadata.task_id`. Historically the daemon DROPPED these
+            # ("no task_id in metadata, skipping") — silently losing a
+            # routable claude invocation on the orchestration path. Run the
+            # prompt without a task lifecycle and return the reply instead.
+            return await self._handle_taskless_invocation(
+                payload, prompt, agent_name,
+            )
 
         # Resolve backend — prefer the agent named in the invocation
         backend_name = agent_name if agent_name in self._backends else next(iter(self._backends))
@@ -320,6 +328,56 @@ class DaemonLoop:
             raise
         finally:
             self._running_tasks.discard(task_id)
+
+    async def _handle_taskless_invocation(
+        self, payload: dict, prompt: str, agent_name: str,
+    ) -> dict | None:
+        """Execute a no-``task_id`` A2A ``message/send`` as a one-shot prompt.
+
+        Counterpart to ``handle_delegate_invocation`` for the
+        ``message/send`` shape: there is no krew task to claim, set status
+        on, or report against — we just run the brain on the prompt and
+        return its reply, which SSEWatcher posts to ``/a2a/respond``. This
+        is the fix for the dropped-invocation bug: a routable claude
+        invocation that lacks ``metadata.task_id`` is now answered instead
+        of skipped.
+        """
+        inv_id = str(payload.get("id", "") or "")
+        if not prompt.strip():
+            logger.info(
+                "invocation %s (%s): no task_id and empty prompt — skipping",
+                inv_id, agent_name,
+            )
+            return {"text": "no task_id and no prompt in invocation"}
+
+        backend_name = (
+            agent_name if agent_name in self._backends
+            else next(iter(self._backends), None)
+        )
+        if backend_name is None:
+            logger.warning(
+                "invocation %s: no backend available for task-less prompt", inv_id,
+            )
+            return {"text": "no backend available for invocation"}
+
+        logger.info(
+            "invocation %s: no task_id in metadata — running task-less prompt via %s",
+            inv_id, backend_name,
+        )
+        backend = self._backends[backend_name]
+        try:
+            async with self._semaphore:
+                session = await backend.execute(prompt, self._working_dir)
+                result = await session.result()
+                aclose = getattr(session, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+            return {"text": (result.summary or "")[:4096]}
+        except Exception as exc:
+            logger.exception(
+                "invocation %s: task-less backend %s crashed", inv_id, backend_name,
+            )
+            return {"text": f"backend crashed: {exc}"[:4096]}
 
     # ------------------------------------------------------------------
     # Cookrew task polling fallback
